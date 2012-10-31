@@ -28,6 +28,7 @@ import com.google.common.collect.ImmutableSortedSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
 import com.google.common.primitives.Ints;
+import org.apache.cassandra.dht.Range;
 import org.codehaus.jackson.JsonEncoding;
 import org.codehaus.jackson.JsonFactory;
 import org.codehaus.jackson.JsonGenerator;
@@ -422,10 +423,24 @@ public class LeveledManifest
         return overlapping(sstable.first.token, sstable.last.token, others);
     }
 
+    public static Set<SSTableReader> overlapping(Range range, Iterable<SSTableReader> sstables)
+    {
+        Set<SSTableReader> overlapped = new HashSet<SSTableReader>();
+        for (SSTableReader candidate : sstables)
+        {
+
+            Bounds<Token> candidateBounds = new Bounds<Token>(candidate.first.token, candidate.last.token);
+            if (range.intersects(candidateBounds))
+                overlapped.add(candidate);
+        }
+        return overlapped;
+    }
+
     /**
      * @return sstables from @param sstables that contain keys between @param start and @param end, inclusive.
      */
-    private static Set<SSTableReader> overlapping(Token start, Token end, Iterable<SSTableReader> sstables)
+    //TODO: Move this somewhere more appropriate
+    public static Set<SSTableReader> overlapping(Token start, Token end, Iterable<SSTableReader> sstables)
     {
         assert start.compareTo(end) <= 0;
         Set<SSTableReader> overlapped = new HashSet<SSTableReader>();

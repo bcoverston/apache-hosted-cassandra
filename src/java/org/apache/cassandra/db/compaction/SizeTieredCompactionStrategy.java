@@ -17,9 +17,14 @@
  */
 package org.apache.cassandra.db.compaction;
 
+import java.awt.print.Printable;
 import java.util.*;
 import java.util.Map.Entry;
 
+import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.service.StorageService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -70,7 +75,26 @@ public class SizeTieredCompactionStrategy extends AbstractCompactionStrategy
         }
 
         Set<SSTableReader> candidates = cfs.getUncompactingSSTables();
-        List<List<SSTableReader>> buckets = getBuckets(createSSTableAndLengthPairs(filterSuspectSSTables(candidates)));
+        //iterate through this for each range of SSTables
+
+        List<Range<Token>> tokenRange = StorageService.instance.getTokenMetadata().getAllRanges();
+
+
+        List<List<SSTableReader>> rangeLists = new ArrayList<List<SSTableReader>>();
+        List<List<SSTableReader>> buckets = new ArrayList<List<SSTableReader>>();
+        for (Range<Token> range : tokenRange)
+        {
+            //separate the buckets by _this_ range
+            logger.info("leftRange: " + range.left.toString() + " rightRange: " + range.right.toString());
+
+            Set<SSTableReader> readers = LeveledManifest.overlapping(range, candidates);
+            logger.info("Overlapping in initial range: " + readers.size());
+
+            List<List<SSTableReader>> newBuckets = getBuckets(
+                    createSSTableAndLengthPairs(filterSuspectSSTables(readers)));
+            buckets.addAll(newBuckets);
+        }
+
         logger.debug("Compaction buckets are {}", buckets);
         updateEstimatedCompactionsByTasks(buckets);
 

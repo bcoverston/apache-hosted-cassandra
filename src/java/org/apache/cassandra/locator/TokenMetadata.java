@@ -17,6 +17,19 @@
  */
 package org.apache.cassandra.locator;
 
+import com.google.common.collect.*;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.gms.FailureDetector;
+import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.utils.BiMultiValMap;
+import org.apache.cassandra.utils.Pair;
+import org.apache.cassandra.utils.SortedBiMultiValMap;
+import org.apache.commons.lang.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.util.*;
@@ -25,21 +38,6 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
-
-import com.google.common.collect.*;
-
-import org.apache.cassandra.utils.BiMultiValMap;
-import org.apache.cassandra.utils.Pair;
-import org.apache.cassandra.utils.SortedBiMultiValMap;
-import org.apache.commons.lang.StringUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.dht.Range;
-import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.gms.FailureDetector;
-import org.apache.cassandra.service.StorageService;
 
 public class TokenMetadata
 {
@@ -455,6 +453,33 @@ public class TokenMetadata
         {
             lock.writeLock().unlock();
         }
+    }
+
+    /**
+     * Get all ranges that span the ring given a set
+     * of tokens. All ranges are in sorted order of
+     * ranges.
+     * @return ranges in sorted order
+     */
+    public List<Range<Token>> getAllRanges()
+    {
+        List<Token> sortedTokens = sortedTokens();
+        if (logger.isDebugEnabled())
+            logger.debug("computing ranges for " + StringUtils.join(sortedTokens, ", "));
+
+        if (sortedTokens.isEmpty())
+            return Collections.emptyList();
+        int size = sortedTokens.size();
+        List<Range<Token>> ranges = new ArrayList<Range<Token>>(size + 1);
+        for (int i = 1; i < size; ++i)
+        {
+            Range<Token> range = new Range<Token>(sortedTokens.get(i - 1), sortedTokens.get(i));
+            ranges.add(range);
+        }
+        Range<Token> range = new Range<Token>(sortedTokens.get(size - 1), sortedTokens.get(0));
+        ranges.add(range);
+
+        return ranges;
     }
 
     public Collection<Token> getTokens(InetAddress endpoint)

@@ -59,7 +59,9 @@ public class StorageServiceServerTest
     public void testGetAllRangesEmpty()
     {
         List<Token> toks = Collections.emptyList();
-        assertEquals(Collections.emptyList(), StorageService.instance.getAllRanges(toks));
+        //TODO: Move this test
+        //assertEquals(Collections.emptyList(), StorageService.instance.getAllRanges(toks));
+        assertEquals(true, false);
     }
 
     @Test

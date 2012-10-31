@@ -24,7 +24,13 @@ import java.util.*;
 import com.google.common.base.Predicates;
 import com.google.common.base.Throwables;
 import com.google.common.collect.Iterators;
+import org.apache.cassandra.db.RangeSliceCommand;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.locator.TokenMetadata;
+import org.apache.cassandra.service.StorageService;
 import org.apache.commons.lang.StringUtils;
+import org.junit.internal.matchers.Each;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -139,6 +145,18 @@ public class CompactionTask extends AbstractCompactionTask
         Collection<SSTableReader> sstables = new ArrayList<SSTableReader>();
         Collection<SSTableWriter> writers = new ArrayList<SSTableWriter>();
 
+        /*
+        Range Aware SSTable Partitioning
+        1. For the ranges being compacted, colate the keys, then start compacting
+        2. Assign the first token a range, make that the 'active' range
+        3. Compact rows until the token is outside of the current compacting range
+        4. Close the current compacting file, and create a new writer.
+        5. Get the next token, make the new range the 'active' range, do 3 until we're done
+        */
+        List<Range<Token>> tokenRange = StorageService.instance.getTokenMetadata().getAllRanges();
+        Range<Token> currentRange = null;
+        Range<Token> newRange = null;
+
         if (collector != null)
             collector.beginCompaction(ci);
         try
@@ -162,32 +180,42 @@ public class CompactionTask extends AbstractCompactionTask
                 AbstractCompactedRow row = nni.next();
                 if (row.isEmpty())
                     continue;
-
-                RowIndexEntry indexEntry = writer.append(row);
                 totalkeysWritten++;
 
-                if (DatabaseDescriptor.getPreheatKeyCache())
+                //TODO: This implementation has an issue with boundary conditions, one of the tokens is in the other
+                // range
+                for (Range<Token> range : tokenRange)
                 {
-                    for (SSTableReader sstable : toCompact)
+                    if(range.contains(row.key.token))
                     {
-                        if (sstable.getCachedPosition(row.key, false) != null)
-                        {
-                            cachedKeys.put(row.key, indexEntry);
-                            break;
-                        }
+                        newRange = range;
+                        //initialize the range
+                        if(currentRange == null)
+                            currentRange = newRange;
+                        break;
                     }
                 }
-                if (!nni.hasNext() || newSSTableSegmentThresholdReached(writer))
+
+                if (newRange == currentRange)
+                    writeRow(cachedKeys, writer, row);
+
+                //test to see if we need to create a new SSTable Segment
+                if (!nni.hasNext() || newSSTableSegmentThresholdReached(writer) || newRange != currentRange)
                 {
                     SSTableReader toIndex = writer.closeAndOpenReader(getMaxDataAge(toCompact));
                     cachedKeyMap.put(toIndex, cachedKeys);
                     sstables.add(toIndex);
-                    if (nni.hasNext())
+                    // If we rolled to a new range, we need to make sure that _this_ row goes into the next sstable
+                    if (nni.hasNext() || newRange != currentRange)
                     {
                         writer = cfs.createCompactionWriter(keysPerSSTable, cfs.directories.getLocationForDisk(dataDirectory), toCompact);
                         writers.add(writer);
                         cachedKeys = new HashMap<DecoratedKey, RowIndexEntry>();
+                        if(newRange != currentRange)
+                            writeRow(cachedKeys, writer, row);
                     }
+                    //reset the range boundary, and start compaction into a new range
+                    currentRange = null;
                 }
             }
         }
@@ -236,6 +264,22 @@ public class CompactionTask extends AbstractCompactionTask
         logger.info(String.format("Compacted to %s.  %,d to %,d (~%d%% of original) bytes for %,d keys at %fMB/s.  Time: %,dms.",
                                   builder.toString(), startsize, endsize, (int) (ratio * 100), totalkeysWritten, mbps, dTime));
         logger.debug(String.format("CF Total Bytes Compacted: %,d", CompactionTask.addToTotalBytesCompacted(endsize)));
+    }
+
+    private void writeRow(Map<DecoratedKey, RowIndexEntry> cachedKeys, SSTableWriter writer, AbstractCompactedRow row)
+    {
+        RowIndexEntry indexEntry = writer.append(row);
+        if (DatabaseDescriptor.getPreheatKeyCache())
+        {
+            for (SSTableReader sstable : toCompact)
+            {
+                if (sstable.getCachedPosition(row.key, false) != null)
+                {
+                    cachedKeys.put(row.key, indexEntry);
+                    break;
+                }
+            }
+        }
     }
 
     protected boolean partialCompactionsAcceptable()

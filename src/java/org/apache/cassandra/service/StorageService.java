@@ -964,7 +964,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (keyspace == null)
             keyspace = Schema.instance.getNonSystemTables().get(0);
 
-        List<Range<Token>> ranges = getAllRanges(tokenMetadata.sortedTokens());
+        List<Range<Token>> ranges = tokenMetadata.getAllRanges();
         return constructRangeToEndpointMap(keyspace, ranges);
     }
 
@@ -2337,32 +2337,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     Collection<Range<Token>> getRangesForEndpoint(String table, InetAddress ep)
     {
         return Table.open(table).getReplicationStrategy().getAddressRanges().get(ep);
-    }
-
-    /**
-     * Get all ranges that span the ring given a set
-     * of tokens. All ranges are in sorted order of
-     * ranges.
-     * @return ranges in sorted order
-    */
-    public List<Range<Token>> getAllRanges(List<Token> sortedTokens)
-    {
-        if (logger.isDebugEnabled())
-            logger.debug("computing ranges for " + StringUtils.join(sortedTokens, ", "));
-
-        if (sortedTokens.isEmpty())
-            return Collections.emptyList();
-        int size = sortedTokens.size();
-        List<Range<Token>> ranges = new ArrayList<Range<Token>>(size + 1);
-        for (int i = 1; i < size; ++i)
-        {
-            Range<Token> range = new Range<Token>(sortedTokens.get(i - 1), sortedTokens.get(i));
-            ranges.add(range);
-        }
-        Range<Token> range = new Range<Token>(sortedTokens.get(size - 1), sortedTokens.get(0));
-        ranges.add(range);
-
-        return ranges;
     }
 
     /**
