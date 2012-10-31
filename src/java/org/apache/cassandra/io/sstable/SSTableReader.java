@@ -330,7 +330,7 @@ public class SSTableReader extends SSTable
         try
         {
             stream = new DataInputStream(new BufferedInputStream(new FileInputStream(descriptor.filenameFor(Component.FILTER))));
-            bf = FilterFactory.deserialize(stream, descriptor.version.filterType);
+            bf = FilterFactory.deserialize(stream, descriptor.version.filterType, true);
         }
         finally
         {
@@ -730,7 +730,10 @@ public class SSTableReader extends SSTable
         {
             assert key instanceof DecoratedKey; // EQ only make sense if the key is a valid row key
             if (!bf.isPresent(((DecoratedKey)key).key))
+            {
+                logger.debug("Bloom filter allows skipping sstable {}", descriptor.generation);
                 return null;
+            }
         }
 
         // next, the key cache (only make sense for valid row key)
@@ -742,6 +745,7 @@ public class SSTableReader extends SSTable
             if (cachedPosition != null)
             {
                 logger.trace("Cache hit for {} -> {}", cacheKey, cachedPosition);
+                logger.debug("Key cache hit for sstable {}", descriptor.generation);
                 return cachedPosition;
             }
         }
@@ -755,9 +759,14 @@ public class SSTableReader extends SSTable
             // we matched the -1th position: if the operator might match forward, we'll start at the first
             // position. We however need to return the correct index entry for that first position.
             if (op.apply(1) >= 0)
+            {
                 sampledPosition = 0;
+            }
             else
+            {
+                logger.debug("Index sample allows skipping sstable {}", descriptor.generation);
                 return null;
+            }
         }
 
         // scan the on-disk index, starting at the nearest sampled position.
@@ -795,7 +804,10 @@ public class SSTableReader extends SSTable
                         opSatisfied = (v == 0);
                         exactMatch = (comparison == 0);
                         if (v < 0)
+                        {
+                            logger.debug("Partition index lookup allows skipping sstable {}", descriptor.generation);
                             return null;
+                        }
                     }
 
                     if (opSatisfied)
@@ -822,6 +834,7 @@ public class SSTableReader extends SSTable
                         }
                         if (op == Operator.EQ && updateCacheAndStats)
                             bloomFilterTracker.addTruePositive();
+                        logger.debug("Partition index lookup complete for sstable {}", descriptor.generation);
                         return indexEntry;
                     }
 
@@ -841,6 +854,7 @@ public class SSTableReader extends SSTable
 
         if (op == Operator.EQ && updateCacheAndStats)
             bloomFilterTracker.addFalsePositive();
+        logger.debug("Partition index lookup complete (bloom filter false positive) {}", descriptor.generation);
         return null;
     }
 
@@ -885,6 +899,8 @@ public class SSTableReader extends SSTable
             dfile.cleanup();
 
             deletingTask.schedule();
+            // close the BF so it can be opened later.
+            FileUtils.closeQuietly(bf);
         }
         assert references.get() >= 0 : "Reference counter " +  references.get() + " for " + dfile.path;
     }
@@ -1099,6 +1115,15 @@ public class SSTableReader extends SSTable
     public RandomAccessReader openIndexReader(boolean skipIOCache)
     {
         return RandomAccessReader.open(new File(getIndexFilename()), skipIOCache);
+    }
+
+    /**
+     * @param component component to get timestamp.
+     * @return last modified time for given component. 0 if given component does not exist or IO error occurs.
+     */
+    public long getCreationTimeFor(Component component)
+    {
+        return new File(descriptor.filenameFor(component)).lastModified();
     }
 
     /**

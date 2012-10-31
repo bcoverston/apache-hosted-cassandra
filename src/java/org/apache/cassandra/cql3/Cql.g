@@ -437,20 +437,25 @@ alterKeyspaceStatement returns [AlterKeyspaceStatement expr]
  * ALTER COLUMN FAMILY <CF> ADD <column> <newtype>;
  * ALTER COLUMN FAMILY <CF> DROP <column>;
  * ALTER COLUMN FAMILY <CF> WITH <property> = <value>;
+ * ALTER COLUMN FAMILY <CF> RENAME <column> TO <column>;
  */
 alterTableStatement returns [AlterTableStatement expr]
     @init {
         AlterTableStatement.Type type = null;
         CFPropDefs props = new CFPropDefs();
+        Map<ColumnIdentifier, ColumnIdentifier> renames = new HashMap<ColumnIdentifier, ColumnIdentifier>();
     }
     : K_ALTER K_COLUMNFAMILY cf=columnFamilyName
           ( K_ALTER id=cident K_TYPE v=comparatorType { type = AlterTableStatement.Type.ALTER; }
           | K_ADD   id=cident v=comparatorType        { type = AlterTableStatement.Type.ADD; }
           | K_DROP  id=cident                         { type = AlterTableStatement.Type.DROP; }
           | K_WITH  properties[props]                 { type = AlterTableStatement.Type.OPTS; }
+          | K_RENAME                                  { type = AlterTableStatement.Type.RENAME; }
+               id1=cident K_TO toId1=cident { renames.put(id1, toId1); }
+               ( K_AND idn=cident K_TO toIdn=cident { renames.put(idn, toIdn); } )*
           )
     {
-        $expr = new AlterTableStatement(cf, type, id, v, props);
+        $expr = new AlterTableStatement(cf, type, id, v, props, renames);
     }
     ;
 
@@ -578,7 +583,7 @@ map_literal returns [Map<Term, Term> value]
     ;
 
 term returns [Term term]
-    : t=(STRING_LITERAL | UUID | INTEGER | FLOAT ) { $term = new Term($t.text, $t.type); }
+    : t=(STRING_LITERAL | UUID | INTEGER | FLOAT | K_TRUE | K_FALSE ) { $term = new Term($t.text, $t.type); }
     | t=QMARK                                      { $term = new Term($t.text, $t.type, ++currentBindMarkerIdx); }
     ;
 
@@ -641,7 +646,7 @@ property[PropertyDefinitions props]
     ;
 
 propertyValue returns [String str]
-    : v=(STRING_LITERAL | IDENT | INTEGER | FLOAT) { $str = $v.text; }
+    : v=(STRING_LITERAL | IDENT | INTEGER | FLOAT | K_TRUE | K_FALSE) { $str = $v.text; }
     | u=unreserved_keyword                         { $str = u; }
     ;
 
@@ -783,6 +788,7 @@ K_VALUES:      V A L U E S;
 K_TIMESTAMP:   T I M E S T A M P;
 K_TTL:         T T L;
 K_ALTER:       A L T E R;
+K_RENAME:      R E N A M E;
 K_ADD:         A D D;
 K_TYPE:        T Y P E;
 K_COMPACT:     C O M P A C T;
@@ -822,6 +828,9 @@ K_WRITETIME:   W R I T E T I M E;
 
 K_MAP:         M A P;
 K_LIST:        L I S T;
+
+K_TRUE:        T R U E;
+K_FALSE:       F A L S E;
 
 // Case-insensitive alpha characters
 fragment A: ('a'|'A');

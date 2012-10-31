@@ -21,6 +21,9 @@ import sun.misc.Unsafe;
 
 import java.lang.reflect.Field;
 
+/**
+ * An off-heap region of memory that must be manually free'd when no longer needed.
+ */
 public class Memory
 {
     private static final Unsafe unsafe;
@@ -61,6 +64,13 @@ public class Memory
     {
         checkPosition(offset);
         unsafe.putByte(peer + offset, b);
+    }
+
+    public void setMemory(long offset, long bytes, byte b)
+    {
+        // check if the last element will fit into the memory
+        checkPosition(offset + bytes - 1);
+        unsafe.setMemory(peer + offset, bytes, b);
     }
 
     /**
@@ -121,11 +131,8 @@ public class Memory
 
     private void checkPosition(long offset)
     {
-        if (peer == 0)
-            throw new IllegalStateException("Memory was freed");
-
-        if (offset < 0 || offset >= size)
-            throw new IndexOutOfBoundsException("Illegal offset: " + offset + ", size: " + size);
+        assert peer != 0 : "Memory was freed";
+        assert offset >= 0 && offset < size : "Illegal offset: " + offset + ", size: " + size;
     }
 
     public void free()
@@ -138,6 +145,19 @@ public class Memory
     public long size()
     {
         return size;
+    }
+
+    @Override
+    public boolean equals(Object o)
+    {
+        if (this == o)
+            return true;
+        if (!(o instanceof Memory))
+            return false;
+        Memory b = (Memory) o;
+        if (peer == b.peer && size == b.size)
+            return true;
+        return false;
     }
 }
 

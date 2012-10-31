@@ -187,7 +187,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     private void maybeReloadCompactionStrategy()
     {
         // Check if there is a need for reloading
-        if (metadata.compactionStrategyClass.equals(compactionStrategy.getClass()) && metadata.compactionStrategyOptions.equals(compactionStrategy.getOptions()))
+        if (metadata.compactionStrategyClass.equals(compactionStrategy.getClass()) && metadata.compactionStrategyOptions.equals(compactionStrategy.options))
             return;
 
         // TODO is there a way to avoid locking here?
@@ -709,10 +709,10 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             future.get();
     }
 
-    public void updateRowCache(DecoratedKey key, ColumnFamily columnFamily)
+    public void maybeUpdateRowCache(DecoratedKey key, ColumnFamily columnFamily)
     {
-        if (metadata.cfId == null)
-            return; // secondary index
+        if (!isRowCacheEnabled())
+            return;
 
         RowCacheKey cacheKey = new RowCacheKey(metadata.cfId, key);
 
@@ -750,7 +750,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
         Memtable mt = getMemtableThreadSafe();
         mt.put(key, columnFamily, indexer);
-        updateRowCache(key, columnFamily);
+        maybeUpdateRowCache(key, columnFamily);
         metric.writeLatency.addNano(System.nanoTime() - start);
 
         // recompute liveRatio, if we have doubled the number of ops since last calculated
@@ -1157,11 +1157,14 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             if (cached instanceof RowCacheSentinel)
             {
                 // Some other read is trying to cache the value, just do a normal non-caching read
+                logger.debug("Row cache miss (race)");
                 return getTopLevelColumns(filter, Integer.MIN_VALUE, false);
             }
+            logger.debug("Row cache hit");
             return (ColumnFamily) cached;
         }
 
+        logger.debug("Row cache miss");
         RowCacheSentinel sentinel = new RowCacheSentinel();
         boolean sentinelSuccess = CacheService.instance.rowCache.putIfAbsent(key, sentinel);
 
@@ -1185,29 +1188,14 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     ColumnFamily getColumnFamily(QueryFilter filter, int gcBefore)
     {
         assert columnFamily.equals(filter.getColumnFamilyName()) : filter.getColumnFamilyName();
-        logger.debug("Executing single-partition query");
 
         ColumnFamily result = null;
 
         long start = System.nanoTime();
         try
         {
-
-            if (!isRowCacheEnabled())
+            if (isRowCacheEnabled())
             {
-                ColumnFamily cf = getTopLevelColumns(filter, gcBefore, false);
-
-                if (cf == null)
-                    return null;
-
-                // TODO this is necessary because when we collate supercolumns together, we don't check
-                // their subcolumns for relevance, so we need to do a second prune post facto here.
-                result = cf.isSuper() ? removeDeleted(cf, gcBefore) : removeDeletedCF(cf, gcBefore);
-
-            }
-            else
-            {
-
                 UUID cfId = Schema.instance.getId(table.name, columnFamily);
                 if (cfId == null)
                 {
@@ -1224,13 +1212,24 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
                 result = filterColumnFamily(cached, filter, gcBefore);
             }
+            else
+            {
+                ColumnFamily cf = getTopLevelColumns(filter, gcBefore, false);
+
+                if (cf == null)
+                    return null;
+
+                // TODO this is necessary because when we collate supercolumns together, we don't check
+                // their subcolumns for relevance, so we need to do a second prune post facto here.
+                result = cf.isSuper() ? removeDeleted(cf, gcBefore) : removeDeletedCF(cf, gcBefore);
+
+            }
         }
         finally
         {
             metric.readLatency.addNano(System.nanoTime() - start);
         }
 
-        logger.debug("Read {} cells", result == null ? 0 : result.getColumnCount());
         return result;
     }
 
@@ -1353,6 +1352,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     public ColumnFamily getTopLevelColumns(QueryFilter filter, int gcBefore, boolean forCache)
     {
+        logger.debug("Executing single-partition query");
         CollationController controller = new CollationController(this, forCache, filter, gcBefore);
         ColumnFamily columns = controller.getTopLevelColumns();
         metric.updateSSTableIterated(controller.getSstablesIterated());
@@ -1438,7 +1438,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     public List<Row> getRangeSlice(ByteBuffer superColumn, final AbstractBounds<RowPosition> range, int maxResults, IFilter columnFilter, List<IndexExpression> rowFilter, boolean maxIsColumns, boolean isPaging)
     {
-        logger.debug("Executing seq scan");
+        logger.debug("Executing seq scan for {}..{}", range.left, range.right);
         return filter(getSequentialIterator(superColumn, range, columnFilter), ExtendedFilter.create(this, columnFilter, rowFilter, maxResults, maxIsColumns, isPaging));
     }
 
@@ -1449,7 +1449,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     public List<Row> search(List<IndexExpression> clause, AbstractBounds<RowPosition> range, int maxResults, IFilter dataFilter, boolean maxIsColumns)
     {
-        logger.debug("Executing indexed scan");
+        logger.debug("Executing indexed scan for {}..{}", range.left, range.right);
         return indexManager.search(clause, range, maxResults, dataFilter, maxIsColumns);
     }
 

@@ -110,6 +110,7 @@ from cqlshlib.displaying import (RED, BLUE, ANSI_RESET, COLUMN_NAME_COLORS,
                                  FormattedValue, colorme)
 from cqlshlib.formatting import format_by_type
 from cqlshlib.util import trim_if_present
+from cqlshlib.tracing import print_trace_session
 
 CONFIG_FILE = os.path.expanduser(os.path.join('~', '.cqlshrc'))
 HISTORY = os.path.expanduser(os.path.join('~', '.cqlsh_history'))
@@ -250,7 +251,7 @@ cqlsh_extra_syntax_rules = r'''
 <debugCommand> ::= "DEBUG" "THINGS"?
                  ;
 
-<helpCommand> ::= ( "HELP" | "?" ) [topic]=( <identifier> | <stringLiteral> )*
+<helpCommand> ::= ( "HELP" | "?" ) [topic]=( /[a-z_]*/ )*
                 ;
 
 <tracingCommand> ::= "TRACING" ( switch=( "ON" | "OFF" ) )?
@@ -974,7 +975,7 @@ class Shell(cmd.Cmd):
             session_id = UUID(bytes=self.trace_next_query())
             result = self.perform_statement_untraced(statement, decoder=None)
             time.sleep(0.5) # trace writes are async so we wait a little.
-            self.print_trace(session_id)
+            print_trace_session(self, self.cursor, session_id)
             return result
         else:
             return self.perform_statement_untraced(statement, decoder=None)
@@ -1019,11 +1020,6 @@ class Shell(cmd.Cmd):
             self.print_result(self.cursor)
         self.flush_output()
         return True
-
-    def print_trace(self, session_id):
-        out = self.query_out
-        out.write('\nTracing session: %s\n\n' % session_id)
-        self.perform_statement_untraced("SELECT activity, source, source_elapsed FROM system_traces.events WHERE session_id = '%s'" % session_id)
 
     # these next two functions are not guaranteed perfect; just checks if the
     # statement parses fully according to cqlsh's own understanding of the
@@ -1078,6 +1074,7 @@ class Shell(cmd.Cmd):
     def print_result(self, cursor):
         self.decoding_errors = []
 
+        self.writeresult("")
         if self.has_static_result_set(cursor):
             self.print_static_result(cursor)
         else:
@@ -1095,11 +1092,13 @@ class Shell(cmd.Cmd):
         colnames = [d[0] for d in cursor.description]
         colnames_t = [(name, self.get_nametype(cursor, n)) for (n, name) in enumerate(colnames)]
         formatted_names = [self.myformat_colname(name, nametype) for (name, nametype) in colnames_t]
-        formatted_data = [map(self.myformat_value, row, cursor.column_types) for row in cursor]
+        formatted_values = [map(self.myformat_value, row, cursor.column_types) for row in cursor]
+        self.print_formatted_result(formatted_names, formatted_values)
 
+    def print_formatted_result(self, formatted_names, formatted_values):
         # determine column widths
         widths = [n.displaywidth for n in formatted_names]
-        for fmtrow in formatted_data:
+        for fmtrow in formatted_values:
             for num, col in enumerate(fmtrow):
                 widths[num] = max(widths[num], col.displaywidth)
 
@@ -1109,7 +1108,7 @@ class Shell(cmd.Cmd):
         self.writeresult('-%s-' % '-+-'.join('-' * w for w in widths))
 
         # print row data
-        for row in formatted_data:
+        for row in formatted_values:
             line = ' | '.join(col.color_rjust(w) for (col, w) in zip(row, widths))
             self.writeresult(' ' + line)
 
@@ -1216,8 +1215,7 @@ class Shell(cmd.Cmd):
         # no metainfo available from system.schema_* for system CFs, so we have
         # to use cfdef-based description for those.
 
-        if ksname not in SYSTEM_KEYSPACES \
-        and self.cqlver_atleast(3):
+        if self.cqlver_atleast(3) and not self.is_cql3_beta():
             try:
                 layout = self.get_columnfamily_layout(ksname, cfname)
             except CQL_ERRORS:
@@ -2643,7 +2641,6 @@ class ErrorHandlingSchemaDecoder(OverrideableSchemaDecoder):
 
     def value_decode_error(self, err, namebytes, valuebytes, expectedtype):
         return DecodeError(valuebytes, err, expectedtype, colname=namebytes)
-
 
 def option_with_default(cparser_getter, section, option, default=None):
     try:

@@ -20,14 +20,15 @@
  */
 package org.apache.cassandra.tracing;
 
-import static com.google.common.base.Preconditions.checkState;
-import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
-
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
@@ -37,10 +38,7 @@ import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.ExpiringColumn;
 import org.apache.cassandra.db.RowMutation;
-import org.apache.cassandra.db.marshal.InetAddressType;
-import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.marshal.TimeUUIDType;
-import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.net.MessageIn;
 import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -48,8 +46,7 @@ import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
 import org.apache.cassandra.utils.WrappedRunnable;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
 
 /**
  * A trace session context. Able to track and store trace sessions. A session is usually a user initiated query, and may
@@ -80,32 +77,29 @@ public class Tracing
 
     private final ThreadLocal<TraceState> state = new ThreadLocal<TraceState>();
 
-    public static void addColumn(ColumnFamily cf, ByteBuffer name, Object value)
-    {
-        cf.addColumn(new ExpiringColumn(name, ByteBufferUtil.bytes(value.toString()), System.currentTimeMillis(), TTL));
-    }
+    private final Map<UUID, TraceState> sessions = new ConcurrentHashMap<UUID, TraceState>();
 
     public static void addColumn(ColumnFamily cf, ByteBuffer name, InetAddress address)
     {
-        cf.addColumn(new ExpiringColumn(name, ByteBufferUtil.bytes(address), System.currentTimeMillis(), TTL));
+        addColumn(cf, name, ByteBufferUtil.bytes(address));
     }
 
     public static void addColumn(ColumnFamily cf, ByteBuffer name, int value)
     {
-        cf.addColumn(new ExpiringColumn(name, ByteBufferUtil.bytes(value), System.currentTimeMillis(), TTL));
+        addColumn(cf, name, ByteBufferUtil.bytes(value));
     }
 
     public static void addColumn(ColumnFamily cf, ByteBuffer name, long value)
     {
-        cf.addColumn(new ExpiringColumn(name, ByteBufferUtil.bytes(value), System.currentTimeMillis(), TTL));
+        addColumn(cf, name, ByteBufferUtil.bytes(value));
     }
 
     public static void addColumn(ColumnFamily cf, ByteBuffer name, String value)
     {
-        cf.addColumn(new ExpiringColumn(name, ByteBufferUtil.bytes(value), System.currentTimeMillis(), TTL));
+        addColumn(cf, name, ByteBufferUtil.bytes(value));
     }
 
-    private void addColumn(ColumnFamily cf, ByteBuffer name, ByteBuffer value)
+    private static void addColumn(ColumnFamily cf, ByteBuffer name, ByteBuffer value)
     {
         cf.addColumn(new ExpiringColumn(name, value, System.currentTimeMillis(), TTL));
     }
@@ -141,11 +135,6 @@ public class Tracing
         return instance != null && instance.state.get() != null;
     }
 
-    public void reset()
-    {
-        state.set(null);
-    }
-
     public UUID newSession()
     {
         return newSession(TimeUUIDType.instance.compose(ByteBuffer.wrap(UUIDGen.getTimeUUIDBytes())));
@@ -155,12 +144,30 @@ public class Tracing
     {
         assert state.get() == null;
 
-        TraceState ts = new TraceState(localAddress, sessionId);
+        TraceState ts = new TraceState(localAddress, sessionId, true);
         state.set(ts);
+        sessions.put(sessionId, ts);
 
         return sessionId;
     }
 
+    /**
+     * Removes the state data but does not log it as complete.
+     * For use by replica nodes, after replying to the master.
+     *
+     * Note: checking that the session exists is the job of the caller.
+     */
+    public void maybeStopNonlocalSession(UUID sessionId)
+    {
+        TraceState state = sessions.get(sessionId);
+        assert state != null;
+        if (!state.isLocallyOwned)
+            sessions.remove(state.sessionId);
+    }
+
+    /**
+     * Stop the session and record its complete.  Called by coodinator when request is complete.
+     */
     public void stopSession()
     {
         TraceState state = this.state.get();
@@ -170,24 +177,24 @@ public class Tracing
         }
         else
         {
-            final long finished_at = System.currentTimeMillis();
+            final int elapsed = state.elapsed();
             final ByteBuffer sessionIdBytes = state.sessionIdBytes;
 
             StageManager.getStage(Stage.TRACING).execute(new WrappedRunnable()
             {
                 public void runMayThrow() throws Exception
                 {
-                    ColumnFamily cf = ColumnFamily.create(CFMetaData.TraceSessionsCf);
-                    addColumn(cf,
-                              buildName(CFMetaData.TraceSessionsCf, bytes("finished_at")),
-                              LongType.instance.decompose(finished_at));
+                    CFMetaData cfMeta = CFMetaData.TraceSessionsCf;
+                    ColumnFamily cf = ColumnFamily.create(cfMeta);
+                    addColumn(cf, buildName(cfMeta, bytes("duration")), elapsed);
                     RowMutation mutation = new RowMutation(TRACE_KS, sessionIdBytes);
                     mutation.add(cf);
                     StorageProxy.mutate(Arrays.asList(mutation), ConsistencyLevel.ANY);
                 }
             });
 
-            reset();
+            sessions.remove(state.sessionId);
+            this.state.set(null);
         }
     }
 
@@ -212,16 +219,11 @@ public class Tracing
         {
             public void runMayThrow() throws Exception
             {
-                ColumnFamily cf = ColumnFamily.create(CFMetaData.TraceSessionsCf);
-                addColumn(cf,
-                          buildName(CFMetaData.TraceSessionsCf, bytes("coordinator")),
-                          InetAddressType.instance.decompose(FBUtilities.getBroadcastAddress()));
-                addColumn(cf,
-                          buildName(CFMetaData.TraceSessionsCf, bytes("request")),
-                          UTF8Type.instance.decompose(request));
-                addColumn(cf,
-                          buildName(CFMetaData.TraceSessionsCf, bytes("started_at")),
-                          LongType.instance.decompose(started_at));
+                CFMetaData cfMeta = CFMetaData.TraceSessionsCf;
+                ColumnFamily cf = ColumnFamily.create(cfMeta);
+                addColumn(cf, buildName(cfMeta, bytes("coordinator")), FBUtilities.getBroadcastAddress());
+                addColumn(cf, buildName(cfMeta, bytes("request")), request);
+                addColumn(cf, buildName(cfMeta, bytes("started_at")), started_at);
                 addParameterColumns(cf, parameters);
                 RowMutation mutation = new RowMutation(TRACE_KS, sessionIdBytes);
                 mutation.add(cf);
@@ -247,7 +249,22 @@ public class Tracing
             return;
         }
 
-        checkState(sessionBytes.length == 16);
-        state.set(new TraceState(message.from, UUIDGen.getUUID(ByteBuffer.wrap(sessionBytes))));
+        assert sessionBytes.length == 16;
+        UUID sessionId = UUIDGen.getUUID(ByteBuffer.wrap(sessionBytes));
+        TraceState ts = sessions.get(sessionId);
+        if (ts == null)
+        {
+            ts = new TraceState(message.from, sessionId, false);
+            sessions.put(sessionId, ts);
+        }
+        state.set(ts);
+    }
+
+    /**
+     * Activate @param sessionId representing a session we've already seen
+     */
+    public void continueExistingSession(UUID sessionId)
+    {
+        state.set(sessions.get(sessionId));
     }
 }

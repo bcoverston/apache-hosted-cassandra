@@ -17,9 +17,10 @@
  */
 package org.apache.cassandra.utils;
 
+import java.io.Closeable;
 import java.nio.ByteBuffer;
 
-public abstract class Filter
+public abstract class Filter implements Closeable
 {
     int hashCount;
 

@@ -21,11 +21,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.cassandra.io.util.Memory;
 
-public class FreeableMemory extends Memory
+public class RefCountedMemory extends Memory
 {
     private final AtomicInteger references = new AtomicInteger(1);
 
-    public FreeableMemory(long size)
+    public RefCountedMemory(long size)
     {
         super(size);
     }
@@ -51,12 +51,5 @@ public class FreeableMemory extends Memory
     {
         if (references.decrementAndGet() == 0)
             free();
-    }
-
-    @Override
-    public byte getByte(long offset)
-    {
-        assert peer != 0;
-        return super.getByte(offset);
     }
 }

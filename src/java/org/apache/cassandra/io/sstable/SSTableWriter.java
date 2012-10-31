@@ -62,10 +62,11 @@ public class SSTableWriter extends SSTable
     private static Set<Component> components(CFMetaData metadata)
     {
         Set<Component> components = new HashSet<Component>(Arrays.asList(Component.DATA,
-                                                                         Component.FILTER,
-                                                                         Component.PRIMARY_INDEX,
-                                                                         Component.STATS,
-                                                                         Component.SUMMARY));
+                                                                 Component.FILTER,
+                                                                 Component.PRIMARY_INDEX,
+                                                                 Component.STATS,
+                                                                 Component.SUMMARY,
+                                                                 Component.TOC));
 
         if (metadata.compressionParameters().sstableCompressor != null)
             components.add(Component.COMPRESSION_INFO);
@@ -324,6 +325,9 @@ public class SSTableWriter extends SSTable
         writeMetadata(descriptor, sstableMetadata);
         maybeWriteDigest();
 
+        // save the table of components
+        SSTable.appendTOC(descriptor, components);
+
         // remove the 'tmp' marker from all components
         final Descriptor newdesc = rename(descriptor, components);
 
@@ -441,8 +445,8 @@ public class SSTableWriter extends SSTable
                 logger.error("Bloom filter FP chance of zero isn't supposed to happen");
                 fpChance = null;
             }
-            bf = fpChance == null ? FilterFactory.getFilter(keyCount, 15)
-                                  : FilterFactory.getFilter(keyCount, fpChance);
+            bf = fpChance == null ? FilterFactory.getFilter(keyCount, 15, true)
+                                  : FilterFactory.getFilter(keyCount, fpChance, true);
         }
 
         public void append(DecoratedKey key, RowIndexEntry indexEntry)

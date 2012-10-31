@@ -31,6 +31,7 @@ import org.apache.cassandra.db.Table;
 import org.apache.cassandra.net.IVerbHandler;
 import org.apache.cassandra.net.MessageIn;
 import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.tracing.Tracing;
 
 public class RangeSliceVerbHandler implements IVerbHandler<RangeSliceCommand>
 {
@@ -55,7 +56,7 @@ public class RangeSliceVerbHandler implements IVerbHandler<RangeSliceCommand>
                 throw new RuntimeException("Cannot service reads while bootstrapping!");
             }
             RangeSliceReply reply = new RangeSliceReply(executeLocally(message.payload));
-            logger.debug("Sending response to {}", message.from);
+            logger.debug("Enqueuing response to {}", message.from);
             MessagingService.instance().sendReply(reply.createMessage(), id, message.from);
         }
         catch (Exception ex)
