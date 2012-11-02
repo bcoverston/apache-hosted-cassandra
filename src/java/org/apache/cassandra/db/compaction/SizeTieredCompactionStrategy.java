@@ -85,10 +85,10 @@ public class SizeTieredCompactionStrategy extends AbstractCompactionStrategy
         for (Range<Token> range : tokenRange)
         {
             //separate the buckets by _this_ range
-            logger.info("leftRange: " + range.left.toString() + " rightRange: " + range.right.toString());
+            logger.debug("leftRange: " + range.left.toString() + " rightRange: " + range.right.toString());
 
             Set<SSTableReader> readers = LeveledManifest.overlapping(range, candidates);
-            logger.info("Overlapping in initial range: " + readers.size());
+            logger.debug("Overlapping in initial range: " + readers.size());
 
             List<List<SSTableReader>> newBuckets = getBuckets(
                     createSSTableAndLengthPairs(filterSuspectSSTables(readers)));

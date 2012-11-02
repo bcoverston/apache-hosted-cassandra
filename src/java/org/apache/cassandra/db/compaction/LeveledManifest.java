@@ -29,6 +29,7 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
 import com.google.common.primitives.Ints;
 import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.utils.Pair;
 import org.codehaus.jackson.JsonEncoding;
 import org.codehaus.jackson.JsonFactory;
 import org.codehaus.jackson.JsonGenerator;
@@ -462,6 +463,26 @@ public class LeveledManifest
         }
     };
 
+    /*
+    Returns minimum value as left, maximum value as right
+    */
+    private Pair<Integer, Integer>  getMinMaxLevel(Iterable<SSTableReader> sstables)
+    {
+        int minimumLevel = Integer.MAX_VALUE;
+        int maximumLevel = 0;
+
+        for (SSTableReader sstable : sstables)
+        {
+            int thisLevel = levelOf(sstable);
+            assert thisLevel >= 0;
+            maximumLevel = Math.max(maximumLevel, thisLevel);
+            minimumLevel = Math.min(minimumLevel, thisLevel);
+        }
+
+        Pair<Integer, Integer> minMaxPair = Pair.create(minimumLevel, maximumLevel);
+        return minMaxPair;
+    }
+
     /**
      * @return highest-priority sstables to compact for the given level.
      * If no compactions are possible (because of concurrent compactions or because some sstables are blacklisted
@@ -526,6 +547,27 @@ public class LeveledManifest
                 if (!Sets.intersection(candidates, compacting).isEmpty() || !overlapping(candidates, compactingL0).isEmpty())
                     return Collections.emptyList();
             }
+
+            //finally, check to see if we're compacting into L1
+            //if we are only compacting into L0 (No L1 candidates, and we're not meeting the promotion threshold (>= maxSStableSizeInBytes)
+            //AND we have overlapping SSTables in any of the candidates
+
+            Pair<Integer, Integer> minMaxLevel = getMinMaxLevel(candidates);
+            if(minMaxLevel.left == 0 && minMaxLevel.right == 0 && SSTable.getTotalBytes(candidates) <= maxSSTableSizeInBytes)
+            {
+                Set<SSTableReader> weakL0CompactionSet = new HashSet<SSTableReader>(candidates);
+                for (SSTableReader candidate : candidates)
+                {
+                    //if we don't overlap with anything in the remaining candidate set, there's no reason to do any compaction
+                    Set<SSTableReader> sstables = overlapping(candidate, candidates);
+                    if(sstables.size() == 1)
+                    {
+                        weakL0CompactionSet.remove(candidate);
+                    }
+                }
+                candidates = weakL0CompactionSet;
+            }
+
 
             return candidates.size() > 1 ? candidates : Collections.<SSTableReader>emptyList();
         }

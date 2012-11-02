@@ -268,7 +268,25 @@ public class CassandraDaemon
             throw new RuntimeException(e);
         }
 
-        // enable auto compaction
+        SystemTable.finishStartup();
+
+        // start server internals
+        StorageService.instance.registerDaemon(this);
+        StorageService.instance.initServerLocally();
+
+        Mx4jTool.maybeLoad();
+
+        // Thift
+        InetAddress rpcAddr = DatabaseDescriptor.getRpcAddress();
+        int rpcPort = DatabaseDescriptor.getRpcPort();
+        thriftServer = new ThriftServer(rpcAddr, rpcPort);
+
+        // Native transport
+        InetAddress nativeAddr = DatabaseDescriptor.getNativeTransportAddress();
+        int nativePort = DatabaseDescriptor.getNativeTransportPort();
+        nativeServer = new org.apache.cassandra.transport.Server(nativeAddr, nativePort);
+
+        // enable auto compaction here after ranges are configured
         for (Table table : Table.all())
         {
             for (ColumnFamilyStore cfs : table.getColumnFamilyStores())
@@ -295,24 +313,6 @@ public class CassandraDaemon
             }
         };
         StorageService.optionalTasks.schedule(runnable, 5 * 60, TimeUnit.SECONDS);
-
-        SystemTable.finishStartup();
-
-        // start server internals
-        StorageService.instance.registerDaemon(this);
-        StorageService.instance.initServerLocally();
-
-        Mx4jTool.maybeLoad();
-
-        // Thift
-        InetAddress rpcAddr = DatabaseDescriptor.getRpcAddress();
-        int rpcPort = DatabaseDescriptor.getRpcPort();
-        thriftServer = new ThriftServer(rpcAddr, rpcPort);
-
-        // Native transport
-        InetAddress nativeAddr = DatabaseDescriptor.getNativeTransportAddress();
-        int nativePort = DatabaseDescriptor.getNativeTransportPort();
-        nativeServer = new org.apache.cassandra.transport.Server(nativeAddr, nativePort);
     }
 
     /**

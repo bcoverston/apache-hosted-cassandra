@@ -18,6 +18,10 @@
 package org.apache.cassandra.utils;
 
 import com.google.common.base.Objects;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
+
+import java.util.List;
 
 public class Interval<C, D>
 {
