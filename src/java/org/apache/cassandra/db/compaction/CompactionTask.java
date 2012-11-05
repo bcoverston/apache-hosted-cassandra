@@ -182,17 +182,21 @@ public class CompactionTask extends AbstractCompactionTask
                     continue;
                 totalkeysWritten++;
 
-                //TODO: This implementation has an issue with boundary conditions, one of the tokens is in the other
-                // range
-                for (Range<Token> range : tokenRange)
+                //don't look for the range every time, only when we don't overlap anymore
+                if(currentRange != null && currentRange.contains((row.key.token)))
+                    newRange = currentRange;
+                else
                 {
-                    if(range.contains(row.key.token))
+                    for (Range<Token> range : tokenRange)
                     {
-                        newRange = range;
-                        //initialize the range
-                        if(currentRange == null)
-                            currentRange = newRange;
-                        break;
+                        if(range.contains(row.key.token))
+                        {
+                            newRange = range;
+                            //initialize the range
+                            if(currentRange == null)
+                                currentRange = newRange;
+                            break;
+                        }
                     }
                 }
 
