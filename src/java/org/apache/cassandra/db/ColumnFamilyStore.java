@@ -984,11 +984,14 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         data.replaceCompactedSSTables(sstables, replacements, compactionType);
     }
 
-    void replaceFlushed(Memtable memtable, SSTableReader sstable)
+    void replaceFlushed(Memtable memtable, List<SSTableReader> sstables)
     {
-        data.replaceFlushed(memtable, sstable);
-        if (sstable != null)
-            CompactionManager.instance.submitBackground(this);
+        data.replaceFlushed(memtable, sstables);
+        for (SSTableReader sstable : sstables)
+        {
+            if (sstable != null)
+                CompactionManager.instance.submitBackground(this);
+        }
     }
 
     public boolean isValid()

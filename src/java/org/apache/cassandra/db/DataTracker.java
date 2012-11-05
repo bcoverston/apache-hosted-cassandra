@@ -121,7 +121,7 @@ public class DataTracker
         while (!view.compareAndSet(currentView, newView));
     }
 
-    public void replaceFlushed(Memtable memtable, SSTableReader sstable)
+    public void replaceFlushed(Memtable memtable, List<SSTableReader> sstables)
     {
         // sstable may be null if we flushed batchlog and nothing needed to be retained
 
@@ -131,9 +131,9 @@ public class DataTracker
             do
             {
                 currentView = view.get();
-                newView = currentView.replaceFlushed(memtable, sstable);
-                if (sstable != null)
-                    newView = newView.replace(Arrays.asList(sstable), Collections.<SSTableReader>emptyList());
+                newView = currentView.replaceFlushed(memtable, sstables);
+                if (sstables != null)
+                    newView = newView.replace(sstables, Collections.<SSTableReader>emptyList());
             }
             while (!view.compareAndSet(currentView, newView));
             return;
@@ -143,15 +143,18 @@ public class DataTracker
         do
         {
             currentView = view.get();
-            newView = currentView.replaceFlushed(memtable, sstable);
+            newView = currentView.replaceFlushed(memtable, sstables);
         }
         while (!view.compareAndSet(currentView, newView));
 
-        if (sstable != null)
+        if (sstables != null)
         {
-            addNewSSTablesSize(Arrays.asList(sstable));
-            notifyAdded(sstable);
-            incrementallyBackup(sstable);
+            addNewSSTablesSize(sstables);
+            for (SSTableReader sstable : sstables)
+            {
+                notifyAdded(sstable);
+                incrementallyBackup(sstable);
+            }
         }
     }
 
@@ -489,12 +492,12 @@ public class DataTracker
             return new View(newMemtable, memtablesPendingFlush, sstables, compacting, intervalTree);
         }
 
-        public View replaceFlushed(Memtable flushedMemtable, SSTableReader newSSTable)
+        public View replaceFlushed(Memtable flushedMemtable, List<SSTableReader> addedSSTables)
         {
             Set<Memtable> newPending = ImmutableSet.copyOf(Sets.difference(memtablesPendingFlush, Collections.singleton(flushedMemtable)));
-            List<SSTableReader> newSSTables = newSSTable == null
+            List<SSTableReader> newSSTables = addedSSTables == null && addedSSTables.isEmpty() == false
                                             ? Collections.<SSTableReader>emptyList()
-                                            : newSSTables(newSSTable);
+                                            : newSSTables(Collections.<SSTableReader>emptyList(), addedSSTables);
             SSTableIntervalTree intervalTree = buildIntervalTree(newSSTables);
             return new View(memtable, newPending, Collections.unmodifiableList(newSSTables), compacting, intervalTree);
         }

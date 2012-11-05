@@ -27,7 +27,10 @@ import com.google.common.base.Function;
 import com.google.common.base.Throwables;
 
 import org.apache.cassandra.db.index.SecondaryIndexManager;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.util.DiskAwareRunnable;
+import org.apache.cassandra.service.StorageService;
 import org.cliffc.high_scale_lib.NonBlockingHashSet;
 import org.github.jamm.MemoryMeter;
 import org.slf4j.Logger;
@@ -426,20 +429,24 @@ public class Memtable
         {
             assert dataDirectory != null : "Flush task is not bound to any disk";
 
-            SSTableReader sstable = writeSortedContents(context, dataDirectory);
-            cfs.replaceFlushed(Memtable.this, sstable);
+            List<SSTableReader> sstables = writeSortedContents(context, dataDirectory);
+
+            cfs.replaceFlushed(Memtable.this, sstables);
             latch.countDown();
         }
 
-        private SSTableReader writeSortedContents(Future<ReplayPosition> context, File dataDirectory) throws ExecutionException, InterruptedException
+        private List<SSTableReader> writeSortedContents(Future<ReplayPosition> context, File dataDirectory) throws ExecutionException, InterruptedException
         {
             logger.info("Writing " + Memtable.this.toString());
 
-            SSTableReader ssTable;
-            // errors when creating the writer that may leave empty temp files.
-            SSTableWriter writer = createFlushWriter(cfs.getTempSSTablePath(cfs.directories.getLocationForDisk(dataDirectory)));
+            List<SSTableWriter> writers = new ArrayList<SSTableWriter>();
+            List<SSTableReader> readers = new ArrayList<SSTableReader>();
+            List<Range<Token>> tokenRange = StorageService.instance.getTokenMetadata().getAllRanges();
+            Range<Token> currentRange = null;
+            Range<Token> newRange = null;
             try
             {
+                SSTableWriter writer = null;
                 // (we can't clear out the map as-we-go to free up memory,
                 //  since the memtable is being used for queries in the "pending flush" category)
                 for (Map.Entry<RowPosition, ColumnFamily> entry : columnFamilies.entrySet())
@@ -461,27 +468,60 @@ public class Memtable
                         // is a CF level tombstone to ensure the delete makes it into an SSTable.
                         ColumnFamilyStore.removeDeletedColumnsOnly(cf, Integer.MIN_VALUE);
                     }
+
+                    if(tokenRange.size() < 2) //just write as we would normally
+                    {
+                        if(writer == null)
+                        {
+                            writer = createFlushWriter(cfs.getTempSSTablePath(cfs.directories.getLocationForDisk(dataDirectory)));
+                            writers.add(writer);
+                        }
+                    }
+                    else
+                    {
+                        if(currentRange == null || currentRange.contains(entry.getKey().getToken()) == false)
+                        {
+                            for (Range<Token> range : tokenRange)
+                            {
+                                if(range.contains(entry.getKey().getToken())){
+                                    currentRange = range;
+                                    writer = createFlushWriter(cfs.getTempSSTablePath(cfs.directories.getLocationForDisk(dataDirectory)));
+                                    writers.add(writer);
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     writer.append((DecoratedKey)entry.getKey(), cf);
                 }
 
-                if (writer.getFilePointer() > 0)
+                for (SSTableWriter ssTableWriter : writers)
                 {
-                    ssTable = writer.closeAndOpenReader();
-                    logger.info(String.format("Completed flushing %s (%d bytes) for commitlog position %s",
-                                              ssTable.getFilename(), new File(ssTable.getFilename()).length(), context.get()));
-                }
-                else
-                {
-                    writer.abort();
-                    ssTable = null;
-                    logger.info("Completed flushing; nothing needed to be retained.  Commitlog position was {}",
+                    SSTableReader ssTable;
+                    if (ssTableWriter.getFilePointer() > 0)
+                    {
+                        ssTable = ssTableWriter.closeAndOpenReader();
+                        logger.info(String.format("Completed flushing %s (%d bytes) for commitlog position %s",
+                                ssTable.getFilename(), new File(ssTable.getFilename()).length(), context.get()));
+                    }
+                    else
+                    {
+                        ssTableWriter.abort();
+                        ssTable = null;
+                        logger.info("Completed flushing; nothing needed to be retained.  Commitlog position was {}",
                                 context.get());
+                    }
+                    readers.add(ssTable);
                 }
-                return ssTable;
+
+                return readers;
             }
             catch (Throwable e)
             {
-                writer.abort();
+                for (SSTableWriter writer : writers)
+                {
+                    writer.abort();
+                }
                 throw Throwables.propagate(e);
             }
         }
