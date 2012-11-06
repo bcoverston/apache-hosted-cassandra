@@ -23,6 +23,7 @@ import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.thrift.CfSplit;
 import org.apache.cassandra.utils.BiMultiValMap;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.SortedBiMultiValMap;
@@ -478,7 +479,6 @@ public class TokenMetadata
         }
         Range<Token> range = new Range<Token>(sortedTokens.get(size - 1), sortedTokens.get(0));
         ranges.add(range);
-
         return ranges;
     }
 

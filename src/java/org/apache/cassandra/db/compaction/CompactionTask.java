@@ -172,6 +172,7 @@ public class CompactionTask extends AbstractCompactionTask
 
             SSTableWriter writer = cfs.createCompactionWriter(keysPerSSTable, cfs.directories.getLocationForDisk(dataDirectory), toCompact);
             writers.add(writer);
+
             while (nni.hasNext())
             {
                 if (ci.isStopRequested())
@@ -198,10 +199,13 @@ public class CompactionTask extends AbstractCompactionTask
                             break;
                         }
                     }
+                    //at this point we should have found our range in the set of returned ranges
+                    assert currentRange != null;
                 }
-
                 if (newRange == currentRange)
+                {
                     writeRow(cachedKeys, writer, row);
+                }
 
                 //test to see if we need to create a new SSTable Segment
                 if (!nni.hasNext() || newSSTableSegmentThresholdReached(writer) || newRange != currentRange)
