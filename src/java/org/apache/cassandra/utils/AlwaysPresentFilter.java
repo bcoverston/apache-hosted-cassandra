@@ -1,4 +1,4 @@
-package org.apache.cassandra.db.columniterator;
+package org.apache.cassandra.utils;
 /*
  * 
  * Licensed to the Apache Software Foundation (ASF) under one
@@ -21,7 +21,19 @@ package org.apache.cassandra.db.columniterator;
  */
 
 
-public interface IColumnIteratorFactory
+import java.io.IOException;
+import java.nio.ByteBuffer;
+
+public class AlwaysPresentFilter implements IFilter
 {
-    OnDiskAtomIterator create();
+    public boolean isPresent(ByteBuffer key)
+    {
+        return true;
+    }
+
+    public void add(ByteBuffer key) { }
+
+    public void clear() { }
+
+    public void close() throws IOException { }
 }

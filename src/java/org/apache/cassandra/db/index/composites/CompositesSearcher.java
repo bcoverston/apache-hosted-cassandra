@@ -23,6 +23,7 @@ import java.util.*;
 
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.*;
+import org.apache.cassandra.db.index.AbstractSimplePerColumnSecondaryIndex;
 import org.apache.cassandra.db.index.PerColumnSecondaryIndex;
 import org.apache.cassandra.db.index.SecondaryIndex;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
@@ -77,7 +78,7 @@ public class CompositesSearcher extends SecondaryIndexSearcher
     }
 
     @Override
-    public List<Row> search(List<IndexExpression> clause, AbstractBounds<RowPosition> range, int maxResults, IFilter dataFilter, boolean maxIsColumns)
+    public List<Row> search(List<IndexExpression> clause, AbstractBounds<RowPosition> range, int maxResults, IDiskAtomFilter dataFilter, boolean maxIsColumns)
     {
         assert clause != null && !clause.isEmpty();
         ExtendedFilter filter = ExtendedFilter.create(baseCfs, dataFilter, clause, maxResults, maxIsColumns, false);
@@ -93,6 +94,10 @@ public class CompositesSearcher extends SecondaryIndexSearcher
         final SecondaryIndex index = indexManager.getIndexForColumn(primary.column_name);
         assert index != null;
         final DecoratedKey indexKey = index.getIndexKeyFor(primary.value);
+
+        if (logger.isDebugEnabled())
+            logger.debug("Most-selective indexed predicate is {}",
+                         ((AbstractSimplePerColumnSecondaryIndex) index).expressionString(primary));
 
         /*
          * XXX: If the range requested is a token range, we'll have to start at the beginning (and stop at the end) of
@@ -204,14 +209,13 @@ public class CompositesSearcher extends SecondaryIndexSearcher
                     {
                         if (columnsRead < rowsPerQuery)
                         {
-                            logger.debug("Read only {} (< {}) last page through, must be done", columnsRead, rowsPerQuery);
+                            logger.trace("Read only {} (< {}) last page through, must be done", columnsRead, rowsPerQuery);
                             return makeReturn(currentKey, data);
                         }
 
-                        // TODO: broken because we need to extract the component comparator rather than the whole name comparator
-                        // if (logger.isDebugEnabled())
-                        //     logger.debug("Scanning index {} starting with {}",
-                        //                  expressionString(primary), indexComparator.getString(startPrefix));
+                        if (logger.isTraceEnabled())
+                            logger.trace("Scanning index {} starting with {}",
+                                         ((AbstractSimplePerColumnSecondaryIndex)index).expressionString(primary), indexComparator.getString(startPrefix));
 
                         QueryFilter indexFilter = QueryFilter.getSliceFilter(indexKey,
                                                                              new QueryPath(index.getIndexCfs().getColumnFamilyName()),
@@ -233,13 +237,13 @@ public class CompositesSearcher extends SecondaryIndexSearcher
                         {
                             // skip the row we already saw w/ the last page of results
                             indexColumns.poll();
-                            logger.debug("Skipping {}", indexComparator.getString(firstColumn.name()));
+                            logger.trace("Skipping {}", indexComparator.getString(firstColumn.name()));
                         }
                         else if (range instanceof Range && !indexColumns.isEmpty() && firstColumn.name().equals(startPrefix))
                         {
                             // skip key excluded by range
                             indexColumns.poll();
-                            logger.debug("Skipping first key as range excludes it");
+                            logger.trace("Skipping first key as range excludes it");
                         }
                     }
 
@@ -249,7 +253,7 @@ public class CompositesSearcher extends SecondaryIndexSearcher
                         lastSeenPrefix = column.name();
                         if (column.isMarkedForDelete())
                         {
-                            logger.debug("skipping {}", column.name());
+                            logger.trace("skipping {}", column.name());
                             continue;
                         }
 
@@ -276,7 +280,7 @@ public class CompositesSearcher extends SecondaryIndexSearcher
 
                         if (!range.right.isMinimum(baseCfs.partitioner) && range.right.compareTo(dk) < 0)
                         {
-                            logger.debug("Reached end of assigned scan range");
+                            logger.trace("Reached end of assigned scan range");
                             return endOfData();
                         }
                         if (!range.contains(dk))
@@ -285,7 +289,7 @@ public class CompositesSearcher extends SecondaryIndexSearcher
                             continue;
                         }
 
-                        logger.debug("Adding index hit to current row for {}", indexComparator.getString(lastSeenPrefix));
+                        logger.trace("Adding index hit to current row for {}", indexComparator.getString(lastSeenPrefix));
                         // For sparse composites, we're good querying the whole logical row
                         // Obviously if this index is used for other usage, that might be inefficient
                         CompositeType.Builder builder = baseComparator.builder();

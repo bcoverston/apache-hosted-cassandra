@@ -29,7 +29,6 @@ import org.apache.cassandra.cql3.operations.Operation;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.*;
-import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Pair;
 
@@ -105,7 +104,7 @@ public class UpdateStatement extends ModificationStatement
     }
 
     /** {@inheritDoc} */
-    public Collection<IMutation> getMutations(ClientState clientState, List<ByteBuffer> variables, boolean local, ConsistencyLevel cl, long now)
+    public Collection<IMutation> getMutations(List<ByteBuffer> variables, boolean local, ConsistencyLevel cl, long now)
     throws RequestExecutionException, RequestValidationException
     {
         List<ByteBuffer> keys = buildKeyNames(cfDef, processedKeys, variables);
@@ -114,7 +113,7 @@ public class UpdateStatement extends ModificationStatement
         buildColumnNames(cfDef, processedKeys, builder, variables, true);
 
         // Lists SET operation incurs a read.
-        List<ByteBuffer> toRead = null;
+        Set<ByteBuffer> toRead = null;
         for (Map.Entry<CFDefinition.Name, Operation> entry : processedColumns.entries())
         {
             CFDefinition.Name name = entry.getKey();
@@ -126,9 +125,8 @@ public class UpdateStatement extends ModificationStatement
             if (value.requiresRead())
             {
                 if (toRead == null)
-                    toRead = new ArrayList<ByteBuffer>();
+                    toRead = new TreeSet<ByteBuffer>(UTF8Type.instance);
                 toRead.add(name.name.key);
-                break;
             }
         }
 

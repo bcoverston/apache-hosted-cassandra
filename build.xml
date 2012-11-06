@@ -25,7 +25,7 @@
     <property name="debuglevel" value="source,lines,vars"/>
 
     <!-- default version and SCM information -->
-    <property name="base.version" value="1.2.0-beta1"/>
+    <property name="base.version" value="1.2.0-beta2"/>
     <property name="scm.connection" value="scm:git://git.apache.org/cassandra.git"/>
     <property name="scm.developerConnection" value="scm:git://git.apache.org/cassandra.git"/>
     <property name="scm.url" value="http://git-wip-us.apache.org/repos/asf?p=cassandra.git;a=tree"/>
@@ -362,7 +362,7 @@
           <dependency groupId="org.apache.rat" artifactId="apache-rat" version="0.6">
              <exclusion groupId="commons-lang" artifactId="commons-lang"/>
           </dependency>
-          <dependency groupId="org.apache.hadoop" artifactId="hadoop-core" version="1.0.2"/>
+          <dependency groupId="org.apache.hadoop" artifactId="hadoop-core" version="1.0.3"/>
           <dependency groupId="org.apache.pig" artifactId="pig" version="0.10.0"/>
           <dependency groupId="net.sf.jopt-simple" artifactId="jopt-simple" version="3.2"/>
           <dependency groupId="net.java.dev.jna" artifactId="jna" version="3.2.7"/>

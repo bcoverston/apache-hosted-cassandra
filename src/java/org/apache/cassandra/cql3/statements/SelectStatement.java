@@ -41,6 +41,7 @@ import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.dht.*;
 import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.service.RangeSliceVerbHandler;
 import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.service.StorageService;
@@ -117,7 +118,7 @@ public class SelectStatement implements CQLStatement
         // Nothing to do, all validation has been done by RawStatement.prepare()
     }
 
-    public ResultMessage.Rows execute(ConsistencyLevel cl, ClientState state, List<ByteBuffer> variables) throws RequestExecutionException, RequestValidationException
+    public ResultMessage.Rows execute(ConsistencyLevel cl, QueryState state, List<ByteBuffer> variables) throws RequestExecutionException, RequestValidationException
     {
         if (cl == null)
             throw new InvalidRequestException("Invalid empty consistency level");
@@ -155,7 +156,7 @@ public class SelectStatement implements CQLStatement
         return rows;
     }
 
-    public ResultMessage.Rows executeInternal(ClientState state) throws RequestExecutionException, RequestValidationException
+    public ResultMessage.Rows executeInternal(QueryState state) throws RequestExecutionException, RequestValidationException
     {
         try
         {
@@ -201,7 +202,7 @@ public class SelectStatement implements CQLStatement
         Collection<ByteBuffer> keys = getKeys(variables);
         List<ReadCommand> commands = new ArrayList<ReadCommand>(keys.size());
 
-        IFilter filter = makeFilter(variables);
+        IDiskAtomFilter filter = makeFilter(variables);
         // ...a range (slice) of column names
         if (isColumnRange())
         {
@@ -228,7 +229,7 @@ public class SelectStatement implements CQLStatement
 
     private RangeSliceCommand getRangeCommand(List<ByteBuffer> variables) throws RequestValidationException
     {
-        IFilter filter = makeFilter(variables);
+        IDiskAtomFilter filter = makeFilter(variables);
         List<IndexExpression> expressions = getIndexExpressions(variables);
         // The LIMIT provided by the user is the number of CQL row he wants returned.
         // For NamesQueryFilter, this is the number of internal rows returned, since a NamesQueryFilter can only select one CQL row in a given internal row.
@@ -290,7 +291,7 @@ public class SelectStatement implements CQLStatement
         return bounds;
     }
 
-    private IFilter makeFilter(List<ByteBuffer> variables)
+    private IDiskAtomFilter makeFilter(List<ByteBuffer> variables)
     throws InvalidRequestException
     {
         if (isColumnRange())
@@ -1179,8 +1180,10 @@ public class SelectStatement implements CQLStatement
                 if (stmt.isKeyRange)
                     throw new InvalidRequestException("ORDER BY is only supported when the partition key is restricted by an EQ or an IN.");
 
-                // check if we are trying to order by column that wouldn't be included in the results
-                if (!stmt.selectedNames.isEmpty()) // empty means wildcard was used
+                // If we order an IN query, we'll have to do a manual sort post-query. Currently, this sorting requires that we
+                // have queried the column on which we sort (TODO: we should update it to add the column on which we sort to the one
+                // queried automatically, and then removing it from the resultSet afterwards if needed)
+                if (stmt.keyIsInRelation && !stmt.selectedNames.isEmpty()) // empty means wildcard was used
                 {
                     for (ColumnIdentifier column : stmt.parameters.orderings.keySet())
                     {

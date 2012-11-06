@@ -272,7 +272,16 @@ public class CassandraDaemon
 
         // start server internals
         StorageService.instance.registerDaemon(this);
-        StorageService.instance.initServerLocally();
+        try
+        {
+            StorageService.instance.initServer();
+        }
+        catch (ConfigurationException e)
+        {
+            logger.error("Fatal configuration error", e);
+            System.err.println(e.getMessage() + "\nFatal configuration error; unable to start server.  See log for stacktrace.");
+            System.exit(1);
+        }
 
         Mx4jTool.maybeLoad();
 
@@ -286,7 +295,7 @@ public class CassandraDaemon
         int nativePort = DatabaseDescriptor.getNativeTransportPort();
         nativeServer = new org.apache.cassandra.transport.Server(nativeAddr, nativePort);
 
-        // enable auto compaction here after ranges are configured
+        // enable auto compaction (but only after we had a chance to set up our ranges)
         for (Table table : Table.all())
         {
             for (ColumnFamilyStore cfs : table.getColumnFamilyStores())
@@ -348,17 +357,6 @@ public class CassandraDaemon
             nativeServer.start();
         else
             logger.info("Not starting native transport as requested. Use JMX (StorageService->startNativeTransport()) to start it");
-
-        try
-        {
-            StorageService.instance.maybeJoinRing(StorageService.RING_DELAY);
-        }
-        catch (ConfigurationException e)
-        {
-            logger.error("Fatal configuration error", e);
-            System.err.println(e.getMessage() + "\nFatal configuration error; unable to start server.  See log for stacktrace.");
-            System.exit(1);
-        }
     }
 
     /**

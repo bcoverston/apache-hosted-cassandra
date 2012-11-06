@@ -23,6 +23,7 @@ import java.util.*;
 
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.*;
+import org.apache.cassandra.db.index.AbstractSimplePerColumnSecondaryIndex;
 import org.apache.cassandra.db.index.PerColumnSecondaryIndex;
 import org.apache.cassandra.db.index.SecondaryIndex;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
@@ -68,22 +69,13 @@ public class KeysSearcher extends SecondaryIndexSearcher
         return best;
     }
 
-    private String expressionString(IndexExpression expr)
-    {
-        return String.format("'%s.%s %s %s'",
-                             baseCfs.columnFamily,
-                             baseCfs.getComparator().getString(expr.column_name),
-                             expr.op,
-                             baseCfs.metadata.getColumn_metadata().get(expr.column_name).getValidator().getString(expr.value));
-    }
-
     public boolean isIndexing(List<IndexExpression> clause)
     {
         return highestSelectivityPredicate(clause) != null;
     }
 
     @Override
-    public List<Row> search(List<IndexExpression> clause, AbstractBounds<RowPosition> range, int maxResults, IFilter dataFilter, boolean maxIsColumns)
+    public List<Row> search(List<IndexExpression> clause, AbstractBounds<RowPosition> range, int maxResults, IDiskAtomFilter dataFilter, boolean maxIsColumns)
     {
         assert clause != null && !clause.isEmpty();
         ExtendedFilter filter = ExtendedFilter.create(baseCfs, dataFilter, clause, maxResults, maxIsColumns, false);
@@ -97,10 +89,12 @@ public class KeysSearcher extends SecondaryIndexSearcher
         // TODO: allow merge join instead of just one index + loop
         final IndexExpression primary = highestSelectivityPredicate(filter.getClause());
         final SecondaryIndex index = indexManager.getIndexForColumn(primary.column_name);
-        if (logger.isDebugEnabled())
-            logger.debug("Primary scan clause is " + baseCfs.getComparator().getString(primary.column_name));
         assert index != null;
         final DecoratedKey indexKey = index.getIndexKeyFor(primary.value);
+
+        if (logger.isDebugEnabled())
+            logger.debug("Most-selective indexed predicate is {}",
+                         ((AbstractSimplePerColumnSecondaryIndex) index).expressionString(primary));
 
         /*
          * XXX: If the range requested is a token range, we'll have to start at the beginning (and stop at the end) of
@@ -129,13 +123,13 @@ public class KeysSearcher extends SecondaryIndexSearcher
                     {
                         if (columnsRead < rowsPerQuery)
                         {
-                            logger.debug("Read only {} (< {}) last page through, must be done", columnsRead, rowsPerQuery);
+                            logger.trace("Read only {} (< {}) last page through, must be done", columnsRead, rowsPerQuery);
                             return endOfData();
                         }
 
-                        if (logger.isDebugEnabled())
-                            logger.debug("Scanning index {} starting with {}",
-                                         expressionString(primary), index.getBaseCfs().metadata.getKeyValidator().getString(startKey));
+                        if (logger.isTraceEnabled() && (index instanceof AbstractSimplePerColumnSecondaryIndex))
+                            logger.trace("Scanning index {} starting with {}",
+                                         ((AbstractSimplePerColumnSecondaryIndex)index).expressionString(primary), index.getBaseCfs().metadata.getKeyValidator().getString(startKey));
 
                         QueryFilter indexFilter = QueryFilter.getSliceFilter(indexKey,
                                                                              new QueryPath(index.getIndexCfs().getColumnFamilyName()),
@@ -144,10 +138,10 @@ public class KeysSearcher extends SecondaryIndexSearcher
                                                                              false,
                                                                              rowsPerQuery);
                         ColumnFamily indexRow = index.getIndexCfs().getColumnFamily(indexFilter);
-                        logger.debug("fetched {}", indexRow);
+                        logger.trace("fetched {}", indexRow);
                         if (indexRow == null)
                         {
-                            logger.debug("no data, all done");
+                            logger.trace("no data, all done");
                             return endOfData();
                         }
 
@@ -161,13 +155,13 @@ public class KeysSearcher extends SecondaryIndexSearcher
                         {
                             // skip the row we already saw w/ the last page of results
                             indexColumns.next();
-                            logger.debug("Skipping {}", baseCfs.metadata.getKeyValidator().getString(firstColumn.name()));
+                            logger.trace("Skipping {}", baseCfs.metadata.getKeyValidator().getString(firstColumn.name()));
                         }
                         else if (range instanceof Range && indexColumns.hasNext() && firstColumn.name().equals(startKey))
                         {
                             // skip key excluded by range
                             indexColumns.next();
-                            logger.debug("Skipping first key as range excludes it");
+                            logger.trace("Skipping first key as range excludes it");
                         }
                     }
 
@@ -177,23 +171,23 @@ public class KeysSearcher extends SecondaryIndexSearcher
                         lastSeenKey = column.name();
                         if (column.isMarkedForDelete())
                         {
-                            logger.debug("skipping {}", column.name());
+                            logger.trace("skipping {}", column.name());
                             continue;
                         }
 
                         DecoratedKey dk = baseCfs.partitioner.decorateKey(lastSeenKey);
                         if (!range.right.isMinimum(baseCfs.partitioner) && range.right.compareTo(dk) < 0)
                         {
-                            logger.debug("Reached end of assigned scan range");
+                            logger.trace("Reached end of assigned scan range");
                             return endOfData();
                         }
                         if (!range.contains(dk))
                         {
-                            logger.debug("Skipping entry {} outside of assigned scan range", dk.token);
+                            logger.trace("Skipping entry {} outside of assigned scan range", dk.token);
                             continue;
                         }
 
-                        logger.debug("Returning index hit for {}", dk);
+                        logger.trace("Returning index hit for {}", dk);
                         ColumnFamily data = baseCfs.getColumnFamily(new QueryFilter(dk, path, filter.initialFilter()));
                         // While the column family we'll get in the end should contains the primary clause column, the initialFilter may not have found it and can thus be null
                         if (data == null)
@@ -201,7 +195,7 @@ public class KeysSearcher extends SecondaryIndexSearcher
 
                         // as in CFS.filter - extend the filter to ensure we include the columns 
                         // from the index expressions, just in case they weren't included in the initialFilter
-                        IFilter extraFilter = filter.getExtraFilter(data);
+                        IDiskAtomFilter extraFilter = filter.getExtraFilter(data);
                         if (extraFilter != null)
                         {
                             ColumnFamily cf = baseCfs.getColumnFamily(new QueryFilter(dk, path, extraFilter));

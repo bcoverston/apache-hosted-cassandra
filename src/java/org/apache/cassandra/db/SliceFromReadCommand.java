@@ -17,16 +17,18 @@
  */
 package org.apache.cassandra.db;
 
-import java.io.*;
+import java.io.DataInput;
+import java.io.DataOutput;
+import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.Collection;
-import java.util.HashSet;
-import java.util.Iterator;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.filter.*;
+import org.apache.cassandra.db.filter.IDiskAtomFilter;
+import org.apache.cassandra.db.filter.QueryFilter;
+import org.apache.cassandra.db.filter.QueryPath;
+import org.apache.cassandra.db.filter.SliceQueryFilter;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.service.RepairCallback;
 import org.apache.cassandra.service.StorageService;
@@ -71,20 +73,23 @@ public class SliceFromReadCommand extends ReadCommand
     @Override
     public ReadCommand maybeGenerateRetryCommand(RepairCallback handler, Row row)
     {
-        int maxLiveColumns = handler.getMaxLiveColumns();
-        int liveColumnsInRow = row != null ? row.getLiveColumnCount() : 0;
+        int maxLiveColumns = handler.getMaxLiveCount();
 
         int count = filter.count;
         assert maxLiveColumns <= count;
         // We generate a retry if at least one node reply with count live columns but after merge we have less
         // than the total number of column we are interested in (which may be < count on a retry)
-        if ((maxLiveColumns == count) && (liveColumnsInRow < getOriginalRequestedCount()))
+        if (maxLiveColumns != count)
+            return null;
+
+        int liveCountInRow = row == null || row.cf == null ? 0 : filter.getLiveCount(row.cf);
+        if (liveCountInRow < getOriginalRequestedCount())
         {
-            // We asked t (= count) live columns and got l (=liveColumnsInRow) ones.
+            // We asked t (= count) live columns and got l (=liveCountInRow) ones.
             // From that, we can estimate that on this row, for x requested
             // columns, only l/t end up live after reconciliation. So for next
             // round we want to ask x column so that x * (l/t) == t, i.e. x = t^2/l.
-            int retryCount = liveColumnsInRow == 0 ? count + 1 : ((count * count) / liveColumnsInRow) + 1;
+            int retryCount = liveCountInRow == 0 ? count + 1 : ((count * count) / liveCountInRow) + 1;
             SliceQueryFilter newFilter = filter.withUpdatedCount(retryCount);
             return new RetriedSliceFromReadCommand(table, key, queryPath, newFilter, getOriginalRequestedCount());
         }
@@ -98,35 +103,12 @@ public class SliceFromReadCommand extends ReadCommand
         if ((row == null) || (row.cf == null))
             return;
 
-        int liveColumnsInRow = row.cf.getLiveColumnCount();
+        filter.trim(row.cf, getOriginalRequestedCount());
+    }
 
-        if (liveColumnsInRow > getOriginalRequestedCount())
-        {
-            int columnsToTrim = liveColumnsInRow - getOriginalRequestedCount();
-
-            logger.debug("trimming {} live columns to the originally requested {}", row.cf.getLiveColumnCount(), getOriginalRequestedCount());
-
-            Collection<IColumn> columns;
-            if (filter.reversed)
-                columns = row.cf.getSortedColumns();
-            else
-                columns = row.cf.getReverseSortedColumns();
-
-            Collection<ByteBuffer> toRemove = new HashSet<ByteBuffer>();
-
-            Iterator<IColumn> columnIterator = columns.iterator();
-            while (columnIterator.hasNext() && (toRemove.size() < columnsToTrim))
-            {
-                IColumn column = columnIterator.next();
-                if (column.isLive())
-                    toRemove.add(column.name());
-            }
-
-            for (ByteBuffer columnName : toRemove)
-            {
-                row.cf.remove(columnName);
-            }
-        }
+    public IDiskAtomFilter filter()
+    {
+        return filter;
     }
 
     /**

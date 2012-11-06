@@ -400,12 +400,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     public synchronized void initServer(int delay) throws ConfigurationException
     {
-        initServerLocally();
-        maybeJoinRing(delay);
-    }
-
-    public void initServerLocally()
-    {
         logger.info("Cassandra version: " + FBUtilities.getReleaseVersionString());
         logger.info("Thrift API version: " + Constants.VERSION);
         logger.info("CQL supported versions: " + StringUtils.join(ClientState.getCQLSupportedVersion(), ",") + " (default: " + ClientState.DEFAULT_CQL_VERSION + ")");
@@ -501,19 +495,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             }
         }, "StorageServiceShutdownHook");
         Runtime.getRuntime().addShutdownHook(drainOnShutdown);
-    }
-
-    public synchronized void maybeJoinRing(int delay) throws ConfigurationException
-    {
-        // This method should only be called as part of the server initialization, so if initialized == true, we've already gone
-        // through that. If the ring must be joined after the server initialization, use joinTokenRing() directly.
-        if (initialized)
-        {
-            if (isClientMode)
-                throw new UnsupportedOperationException("StorageService does not support switching modes.");
-            return;
-        }
-        initialized = true;
 
         if (Boolean.parseBoolean(System.getProperty("cassandra.join_ring", "true")))
         {
@@ -922,7 +903,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     /**
      * for a keyspace, return the ranges and corresponding listen addresses.
      * @param keyspace
-     * @return
+     * @return the endpoint map
      */
     public Map<List<String>, List<String>> getRangeToEndpointMap(String keyspace)
     {
@@ -938,7 +919,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     /**
      * Return the rpc address associated with an endpoint as a string.
      * @param endpoint The endpoint to get rpc address for
-     * @return
+     * @return the rpc address
      */
     public String getRpcaddress(InetAddress endpoint)
     {
@@ -953,7 +934,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     /**
      * for a keyspace, return the ranges and corresponding RPC addresses for a given keyspace.
      * @param keyspace
-     * @return
+     * @return the endpoint map
      */
     public Map<List<String>, List<String>> getRangeToRpcaddressMap(String keyspace)
     {
@@ -1546,7 +1527,9 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 // grab any data we are now responsible for and notify responsible node
                 restoreReplicaCount(endpoint, tokenMetadata.getEndpointForHostId(hostId));
             }
-        } // not a member, nothing to do
+        }
+        else // now that the gossiper has told us about this nonexistent member, notify the gossiper to remove it
+            Gossiper.instance.removeEndpoint(endpoint);
     }
 
     private void excise(Collection<Token> tokens, InetAddress endpoint)

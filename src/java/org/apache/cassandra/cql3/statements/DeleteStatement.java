@@ -30,12 +30,8 @@ import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.DeletionInfo;
 import org.apache.cassandra.db.RowMutation;
-import org.apache.cassandra.db.marshal.CollectionType;
-import org.apache.cassandra.db.marshal.CompositeType;
-import org.apache.cassandra.db.marshal.ListType;
-import org.apache.cassandra.db.marshal.MapType;
+import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.*;
-import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.thrift.ThriftValidation;
 import org.apache.cassandra.utils.Pair;
 
@@ -69,7 +65,7 @@ public class DeleteStatement extends ModificationStatement
             cl.validateForWrite(cfDef.cfm.ksName);
     }
 
-    public Collection<RowMutation> getMutations(ClientState clientState, List<ByteBuffer> variables, boolean local, ConsistencyLevel cl, long now)
+    public Collection<RowMutation> getMutations(List<ByteBuffer> variables, boolean local, ConsistencyLevel cl, long now)
     throws RequestExecutionException, RequestValidationException
     {
         // keys
@@ -86,7 +82,7 @@ public class DeleteStatement extends ModificationStatement
             throw new InvalidRequestException(String.format("Missing mandatory PRIMARY KEY part %s since %s specified", firstEmpty, toRemove.iterator().next().left));
 
         // Lists DISCARD operation incurs a read. Do that now.
-        List<ByteBuffer> toRead = null;
+        Set<ByteBuffer> toRead = null;
         for (Pair<CFDefinition.Name, Term> p : toRemove)
         {
             CFDefinition.Name name = p.left;
@@ -95,9 +91,8 @@ public class DeleteStatement extends ModificationStatement
             if ((name.type instanceof ListType) && value != null)
             {
                 if (toRead == null)
-                    toRead = new ArrayList<ByteBuffer>();
+                    toRead = new TreeSet<ByteBuffer>(UTF8Type.instance);
                 toRead.add(name.name.key);
-                break;
             }
         }
 

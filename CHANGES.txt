@@ -1,4 +1,5 @@
 1.2-beta2
+ * fp rate of 1.0 disables BF entirely; LCS defaults to 1.0 (CASSANDRA-4876)
  * off-heap bloom filters for row keys (CASSANDRA_4865)
  * add extension point for sstable components (CASSANDRA-4049)
  * improve tracing output (CASSANDRA-4852, 4862)
@@ -46,6 +47,12 @@
  * Remove system tables accounting from schema (CASSANDRA-4850)
  * Force provided columns in clustering key order in 'CLUSTERING ORDER BY' (CASSANDRA-4881)
  * Fix composite index bug (CASSANDRA-4884)
+ * Fix short read protection for CQL3 (CASSANDRA-4882)
+ * Add tracing support to the binary protocol (CASSANDRA-4699)
+ * Don't allow prepared marker inside collections (CASSANDRA-4890)
+ * Re-allow order by on non-selected columns (CASSANDRA-4645)
+ * Bug when composite index is created in a table having collections (CASSANDRA-4909)
+ * log index scan subject in CompositesSearcher (CASSANDRA-4904)
 Merged from 1.1:
  * add get[Row|Key]CacheEntries to CacheServiceMBean (CASSANDRA-4859)
  * fix get_paged_slice to wrap to next row correctly (CASSANDRA-4816)

@@ -19,11 +19,7 @@ package org.apache.cassandra.db.filter;
 
 import java.io.*;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.Iterator;
-import java.util.List;
+import java.util.*;
 
 import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.Lists;
@@ -41,7 +37,7 @@ import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.net.MessagingService;
 
-public class SliceQueryFilter implements IFilter
+public class SliceQueryFilter implements IDiskAtomFilter
 {
     private static final Logger logger = LoggerFactory.getLogger(SliceQueryFilter.class);
     public static final Serializer serializer = new Serializer();
@@ -145,33 +141,79 @@ public class SliceQueryFilter implements IFilter
 
     public void collectReducedColumns(IColumnContainer container, Iterator<IColumn> reducedColumns, int gcBefore)
     {
-        AbstractType<?> comparator = container.getComparator();
-
-        if (compositesToGroup < 0)
-            columnCounter = new ColumnCounter();
-        else if (compositesToGroup == 0)
-            columnCounter = new ColumnCounter.GroupByPrefix(null, 0);
-        else
-            columnCounter = new ColumnCounter.GroupByPrefix((CompositeType)comparator, compositesToGroup);
+        columnCounter = getColumnCounter(container);
 
         while (reducedColumns.hasNext())
         {
             IColumn column = reducedColumns.next();
             if (logger.isTraceEnabled())
                 logger.trace(String.format("collecting %s of %s: %s",
-                                           columnCounter.live(), count, column.getString(comparator)));
+                                           columnCounter.live(), count, column.getString(container.getComparator())));
 
             columnCounter.count(column, container);
 
             if (columnCounter.live() > count)
-            {
-                logger.debug("Read %s live columns and %s tombstoned", columnCounter.live(), columnCounter.ignored());
                 break;
-            }
 
             // but we need to add all non-gc-able columns to the result for read repair:
             if (QueryFilter.isRelevant(column, container, gcBefore))
                 container.addColumn(column);
+        }
+
+        logger.debug("Read {} live cells and {} tombstoned", columnCounter.live(), columnCounter.ignored());
+    }
+
+    public int getLiveCount(ColumnFamily cf)
+    {
+        ColumnCounter counter = getColumnCounter(cf);
+        for (IColumn column : cf)
+            counter.count(column, cf);
+        return counter.live();
+    }
+
+    private ColumnCounter getColumnCounter(IColumnContainer container)
+    {
+        AbstractType<?> comparator = container.getComparator();
+        if (compositesToGroup < 0)
+            return new ColumnCounter();
+        else if (compositesToGroup == 0)
+            return new ColumnCounter.GroupByPrefix(null, 0);
+        else
+            return new ColumnCounter.GroupByPrefix((CompositeType)comparator, compositesToGroup);
+    }
+
+    public void trim(ColumnFamily cf, int trimTo)
+    {
+        ColumnCounter counter = getColumnCounter(cf);
+
+        Collection<ByteBuffer> toRemove = null;
+        boolean trimRemaining = false;
+
+        Collection<IColumn> columns = reversed
+                                    ? cf.getReverseSortedColumns()
+                                    : cf.getSortedColumns();
+
+        for (IColumn column : columns)
+        {
+            if (trimRemaining)
+            {
+                toRemove.add(column.name());
+                continue;
+            }
+
+            counter.count(column, cf);
+            if (counter.live() > trimTo)
+            {
+                toRemove = new HashSet<ByteBuffer>();
+                toRemove.add(column.name());
+                trimRemaining = true;
+            }
+        }
+
+        if (toRemove != null)
+        {
+            for (ByteBuffer columnName : toRemove)
+                cf.remove(columnName);
         }
     }
 

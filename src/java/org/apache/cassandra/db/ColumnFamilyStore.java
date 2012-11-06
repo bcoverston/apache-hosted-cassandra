@@ -34,6 +34,9 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.Futures;
 
+import org.apache.cassandra.db.filter.IDiskAtomFilter;
+import org.apache.cassandra.tracing.TraceState;
+import org.apache.cassandra.tracing.Tracing;
 import org.cliffc.high_scale_lib.NonBlockingHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,7 +56,6 @@ import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.LeveledCompactionStrategy;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.filter.ExtendedFilter;
-import org.apache.cassandra.db.filter.IFilter;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.index.SecondaryIndex;
@@ -1355,7 +1357,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     public ColumnFamily getTopLevelColumns(QueryFilter filter, int gcBefore, boolean forCache)
     {
-        logger.debug("Executing single-partition query");
+        logger.debug("Executing single-partition query on {}", columnFamily);
         CollationController controller = new CollationController(this, forCache, filter, gcBefore);
         ColumnFamily columns = controller.getTopLevelColumns();
         metric.updateSSTableIterated(controller.getSstablesIterated());
@@ -1377,7 +1379,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
       * @param range Either a Bounds, which includes start key, or a Range, which does not.
       * @param columnFilter description of the columns we're interested in for each row
      */
-    public AbstractScanIterator getSequentialIterator(ByteBuffer superColumn, final AbstractBounds<RowPosition> range, IFilter columnFilter)
+    public AbstractScanIterator getSequentialIterator(ByteBuffer superColumn, final AbstractBounds<RowPosition> range, IDiskAtomFilter columnFilter)
     {
         assert !(range instanceof Range) || !((Range)range).isWrapAround() || range.right.isMinimum() : range;
 
@@ -1387,6 +1389,10 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         QueryFilter filter = new QueryFilter(null, new QueryPath(columnFamily, superColumn, null), columnFilter);
 
         final ViewFragment view = markReferenced(startWith, stopAt);
+        if (logger.isDebugEnabled())
+            logger.debug(String.format("Executing seq scan across %s sstables for %s..%s",
+                                       view.sstables.size(), startWith, stopAt));
+
         try
         {
             final CloseableIterator<Row> iterator = RowIteratorFactory.getIterator(view.memtables, view.sstables, startWith, stopAt, filter, this);
@@ -1434,23 +1440,22 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         }
     }
 
-    public List<Row> getRangeSlice(ByteBuffer superColumn, final AbstractBounds<RowPosition> range, int maxResults, IFilter columnFilter, List<IndexExpression> rowFilter)
+    public List<Row> getRangeSlice(ByteBuffer superColumn, final AbstractBounds<RowPosition> range, int maxResults, IDiskAtomFilter columnFilter, List<IndexExpression> rowFilter)
     {
         return getRangeSlice(superColumn, range, maxResults, columnFilter, rowFilter, false, false);
     }
 
-    public List<Row> getRangeSlice(ByteBuffer superColumn, final AbstractBounds<RowPosition> range, int maxResults, IFilter columnFilter, List<IndexExpression> rowFilter, boolean maxIsColumns, boolean isPaging)
+    public List<Row> getRangeSlice(ByteBuffer superColumn, final AbstractBounds<RowPosition> range, int maxResults, IDiskAtomFilter columnFilter, List<IndexExpression> rowFilter, boolean maxIsColumns, boolean isPaging)
     {
-        logger.debug("Executing seq scan for {}..{}", range.left, range.right);
         return filter(getSequentialIterator(superColumn, range, columnFilter), ExtendedFilter.create(this, columnFilter, rowFilter, maxResults, maxIsColumns, isPaging));
     }
 
-    public List<Row> search(List<IndexExpression> clause, AbstractBounds<RowPosition> range, int maxResults, IFilter dataFilter)
+    public List<Row> search(List<IndexExpression> clause, AbstractBounds<RowPosition> range, int maxResults, IDiskAtomFilter dataFilter)
     {
         return search(clause, range, maxResults, dataFilter, false);
     }
 
-    public List<Row> search(List<IndexExpression> clause, AbstractBounds<RowPosition> range, int maxResults, IFilter dataFilter, boolean maxIsColumns)
+    public List<Row> search(List<IndexExpression> clause, AbstractBounds<RowPosition> range, int maxResults, IDiskAtomFilter dataFilter, boolean maxIsColumns)
     {
         logger.debug("Executing indexed scan for {}..{}", range.left, range.right);
         return indexManager.search(clause, range, maxResults, dataFilter, maxIsColumns);
@@ -1461,18 +1466,26 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         logger.trace("Filtering {} for rows matching {}", rowIterator, filter);
         List<Row> rows = new ArrayList<Row>();
         int columnsCount = 0;
+        int total = 0, matched = 0;
+
+        // disable tracing for the actual scan; otherwise it will log a full trace for each row fetched
+        // -- since index only contains the key, we have to do a "join" on the main table to get the actual data.
+        // this could be useful but it obscures the most important information which is the scanned:matched ratio.
+        TraceState state = Tracing.instance().get();
+        Tracing.instance().set(null);
+
         try
         {
             while (rowIterator.hasNext() && rows.size() < filter.maxRows() && columnsCount < filter.maxColumns())
             {
                 // get the raw columns requested, and additional columns for the expressions if necessary
                 Row rawRow = rowIterator.next();
+                total++;
                 ColumnFamily data = rawRow.cf;
 
                 if (rowIterator.needsFiltering())
                 {
-                    // roughtly
-                    IFilter extraFilter = filter.getExtraFilter(data);
+                    IDiskAtomFilter extraFilter = filter.getExtraFilter(data);
                     if (extraFilter != null)
                     {
                         QueryPath path = new QueryPath(columnFamily);
@@ -1490,12 +1503,14 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                 }
 
                 rows.add(new Row(rawRow.key, data));
+                matched++;
 
                 if (data != null)
                     columnsCount += filter.lastCounted(data);
                 // Update the underlying filter to avoid querying more columns per slice than necessary and to handle paging
                 filter.updateFilter(columnsCount);
             }
+
             return rows;
         }
         finally
@@ -1503,6 +1518,9 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             try
             {
                 rowIterator.close();
+                // re-enable tracing
+                Tracing.instance().set(state);
+                logger.debug("Scanned {} rows and matched {}", total, matched);
             }
             catch (IOException e)
             {
