@@ -18,16 +18,84 @@
 package org.apache.cassandra.service.pager;
 
 import java.nio.ByteBuffer;
+import java.util.Collections;
+import java.util.List;
 
-import org.apache.cassandra.db.filter.ColumnCounter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import com.google.common.base.Objects;
+
+import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.atoms.*;
+import org.apache.cassandra.db.partitions.*;
+import org.apache.cassandra.db.filter.*;
+import org.apache.cassandra.exceptions.RequestValidationException;
+import org.apache.cassandra.exceptions.RequestExecutionException;
+import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.service.StorageProxy;
 
 /**
  * Common interface to single partition queries (by slice and by name).
  *
  * For use by MultiPartitionPager.
  */
-public interface SinglePartitionPager extends QueryPager
+public class SinglePartitionPager extends AbstractQueryPager
 {
-    public ByteBuffer key();
-    public ColumnCounter columnCounter();
+    private static final Logger logger = LoggerFactory.getLogger(SinglePartitionPager.class);
+
+    private final SinglePartitionReadCommand<?> command;
+    private final ClientState cstate;
+
+    private volatile Clustering lastReturned;
+
+    // Don't use directly, use QueryPagers method instead
+    SinglePartitionPager(SinglePartitionReadCommand command, ConsistencyLevel consistencyLevel, ClientState cstate, boolean localQuery)
+    {
+        super(consistencyLevel, localQuery, command.metadata(), command.limits());
+        this.command = command;
+        this.cstate = cstate;
+    }
+
+    SinglePartitionPager(SinglePartitionReadCommand command, ConsistencyLevel consistencyLevel, ClientState cstate, boolean localQuery, PagingState state)
+    {
+        this(command, consistencyLevel, cstate, localQuery);
+
+        if (state != null)
+        {
+            // Note that while we only encode the clustering in the state, we used to encode the full cellname
+            // pre-3.0 so make sure we're backward compatible (as it doesn't cost us much).
+            lastReturned = cfm.layout().decodeCellName(state.cellName).left;
+            restoreState(state.remaining, state.remainingInPartition);
+        }
+    }
+
+    public ByteBuffer key()
+    {
+        return command.partitionKey().getKey();
+    }
+
+    public DataLimits limits()
+    {
+        return command.limits();
+    }
+
+    public PagingState state()
+    {
+        return lastReturned == null
+             ? null
+             : new PagingState(null, cfm.layout().encodeClustering(lastReturned), maxRemaining(), remainingInPartition());
+    }
+
+    protected DataIterator queryNextPage(int pageSize, ConsistencyLevel consistencyLevel, boolean localQuery)
+    throws RequestValidationException, RequestExecutionException
+    {
+        SinglePartitionReadCommand pageCmd = command.forPaging(lastReturned, pageSize);
+        return localQuery ? pageCmd.executeLocally() : pageCmd.execute(consistencyLevel, cstate);
+    }
+
+    protected void recordLast(DecoratedKey key, Row last)
+    {
+        if (last != null)
+            lastReturned = last.clustering().takeAlias();
+    }
 }

@@ -24,9 +24,15 @@ import java.util.*;
 
 import com.google.common.collect.AbstractIterator;
 
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.statements.SelectStatement;
+import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.atoms.*;
+import org.apache.cassandra.db.partitions.DataIterator;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.service.pager.QueryPager;
+import org.apache.cassandra.transport.Server;
 
 /** a utility for doing internal cql-based queries */
 public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
@@ -178,7 +184,11 @@ public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
                     {
                         if (pager.isExhausted())
                             return endOfData();
-                        currentPage = select.process(pager.fetchPage(pageSize)).rows.iterator();
+
+                        try (DataIterator iter = pager.fetchPage(pageSize))
+                        {
+                            currentPage = select.process(iter).rows.iterator();
+                        }
                     }
                     return new Row(metadata, currentPage.next());
                 }
@@ -206,6 +216,37 @@ public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
             this.columns.addAll(names);
             for (int i = 0; i < names.size(); i++)
                 data.put(names.get(i).name.toString(), columns.get(i));
+        }
+
+        public static Row fromInternalRow(CFMetaData metadata, DecoratedKey key, org.apache.cassandra.db.atoms.Row row)
+        {
+            Map<String, ByteBuffer> data = new HashMap<>();
+
+            ByteBuffer[] keyComponents = SelectStatement.getComponents(metadata, key);
+            for (ColumnDefinition def : metadata.partitionKeyColumns())
+                data.put(def.name.toString(), keyComponents[def.position()]);
+
+            Clustering clustering = row.clustering();
+            for (ColumnDefinition def : metadata.clusteringColumns())
+                data.put(def.name.toString(), clustering.get(def.position()));
+
+            for (ColumnDefinition def : metadata.partitionColumns())
+            {
+                if (def.isComplex())
+                {
+                    Iterator<Cell> cells = row.getCells(def);
+                    if (cells != null)
+                        data.put(def.name.toString(), ((CollectionType)def.type).serializeForNativeProtocol(cells, Server.VERSION_3));
+                }
+                else
+                {
+                    Cell cell = row.getCell(def);
+                    if (cell != null)
+                        data.put(def.name.toString(), cell.value());
+                }
+            }
+
+            return new Row(data);
         }
 
         public boolean has(String column)

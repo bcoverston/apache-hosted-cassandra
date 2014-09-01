@@ -19,6 +19,7 @@ package org.apache.cassandra.cql3.selection;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
@@ -28,9 +29,7 @@ import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.ColumnSpecification;
 import org.apache.cassandra.cql3.ResultSet;
-import org.apache.cassandra.db.Cell;
-import org.apache.cassandra.db.CounterCell;
-import org.apache.cassandra.db.ExpiringCell;
+import org.apache.cassandra.db.atoms.Cell;
 import org.apache.cassandra.db.context.CounterContext;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -120,11 +119,22 @@ public abstract class Selection
      */
     public boolean containsACollection()
     {
-        if (!cfm.comparator.hasCollections())
-            return false;
-
         for (ColumnDefinition def : getColumns())
             if (def.type.isCollection() && def.type.isMultiCell())
+                return true;
+
+        return false;
+    }
+
+    /**
+     * Checks if this selection contains any partition key columns.
+     *
+     * @return <code>true</code> if this selection contains a partition key column, <code>false</code> otherwise.
+     */
+    public boolean containsPartitionKeyColumns()
+    {
+        for (ColumnDefinition def : getColumns())
+            if (def.isPartitionKey())
                 return true;
 
         return false;
@@ -223,9 +233,9 @@ public abstract class Selection
         return columns;
     }
 
-    public ResultSetBuilder resultSetBuilder(long now) throws InvalidRequestException
+    public ResultSetBuilder resultSetBuilder() throws InvalidRequestException
     {
-        return new ResultSetBuilder(now);
+        return new ResultSetBuilder();
     }
 
     public abstract boolean isAggregate();
@@ -271,15 +281,19 @@ public abstract class Selection
         List<ByteBuffer> current;
         final long[] timestamps;
         final int[] ttls;
-        final long now;
 
-        private ResultSetBuilder(long now) throws InvalidRequestException
+        private ResultSetBuilder() throws InvalidRequestException
         {
             this.resultSet = new ResultSet(getResultMetadata().copy(), new ArrayList<List<ByteBuffer>>());
             this.selectors = newSelectors();
             this.timestamps = collectTimestamps ? new long[columns.size()] : null;
             this.ttls = collectTTLs ? new int[columns.size()] : null;
-            this.now = now;
+
+            // We use MIN_VALUE to indicate no timestamp and -1 for no ttl
+            if (timestamps != null)
+                Arrays.fill(timestamps, Long.MIN_VALUE);
+            if (ttls != null)
+                Arrays.fill(ttls, -1);
         }
 
         public void add(ByteBuffer v)
@@ -287,25 +301,28 @@ public abstract class Selection
             current.add(v);
         }
 
-        public void add(Cell c)
+        public void add(Cell c, int nowInSec)
         {
-            current.add(isDead(c) ? null : value(c));
+            if (c == null)
+            {
+                current.add(null);
+                return;
+            }
+
+            current.add(value(c));
+
             if (timestamps != null)
-            {
-                timestamps[current.size() - 1] = isDead(c) ? Long.MIN_VALUE : c.timestamp();
-            }
+                timestamps[current.size() - 1] = c.livenessInfo().timestamp();
+
             if (ttls != null)
-            {
-                int ttl = -1;
-                if (!isDead(c) && c instanceof ExpiringCell)
-                    ttl = c.getLocalDeletionTime() - (int) (now / 1000);
-                ttls[current.size() - 1] = ttl;
-            }
+                ttls[current.size() - 1] = c.livenessInfo().remainingTTL(nowInSec);
         }
 
-        private boolean isDead(Cell c)
+        private ByteBuffer value(Cell c)
         {
-            return c == null || !c.isLive(now);
+            return c.isCounterCell()
+                 ? ByteBufferUtil.bytes(CounterContext.instance().total(c.value()))
+                 : c.value();
         }
 
         public void newRow(int protocolVersion) throws InvalidRequestException
@@ -337,13 +354,6 @@ public abstract class Selection
                 resultSet.addRow(selectors.getOutputRow(protocolVersion));
             }
             return resultSet;
-        }
-
-        private ByteBuffer value(Cell c)
-        {
-            return (c instanceof CounterCell)
-                ? ByteBufferUtil.bytes(CounterContext.instance().total(c.value()))
-                : c.value();
         }
     }
 

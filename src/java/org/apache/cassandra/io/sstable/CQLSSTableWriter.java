@@ -33,10 +33,11 @@ import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.cql3.statements.CreateTableStatement;
 import org.apache.cassandra.cql3.statements.ParsedStatement;
 import org.apache.cassandra.cql3.statements.UpdateStatement;
-import org.apache.cassandra.db.ArrayBackedSortedColumns;
-import org.apache.cassandra.db.Cell;
-import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.composites.Composite;
+import org.apache.cassandra.config.*;
+import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.atoms.*;
+import org.apache.cassandra.db.commitlog.CommitLog;
+import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Murmur3Partitioner;
@@ -208,14 +209,17 @@ public class CQLSSTableWriter implements Closeable
 
         QueryOptions options = QueryOptions.forInternalCalls(null, values);
         List<ByteBuffer> keys = insert.buildPartitionKeyNames(options);
-        Composite clusteringPrefix = insert.createClusteringPrefix(options);
+        CBuilder clustering = insert.createClustering(options);
 
         long now = System.currentTimeMillis() * 1000;
+        // Note that we asks indexes to not validate values (the last 'false' arg below) because that triggers a 'Keyspace.open'
+        // and that forces a lot of initialization that we don't want.
         UpdateParameters params = new UpdateParameters(insert.cfm,
                                                        options,
                                                        insert.getTimestamp(now, options),
                                                        insert.getTimeToLive(options),
-                                                       Collections.<ByteBuffer, CQL3Row>emptyMap());
+                                                       Collections.<DecoratedKey, Partition>emptyMap(),
+                                                       false);
 
         try
         {
@@ -223,7 +227,7 @@ public class CQLSSTableWriter implements Closeable
             {
                 if (writer.currentKey() == null || !key.equals(writer.currentKey().getKey()))
                     writer.newRow(key);
-                insert.addUpdateForKey(writer.currentColumnFamily(), key, clusteringPrefix, params, false);
+                insert.addUpdateForKey(writer.currentUpdate(), clustering, params);
             }
             return this;
         }
@@ -518,14 +522,16 @@ public class CQLSSTableWriter implements Closeable
             if (insert == null)
                 throw new IllegalStateException("No insert statement specified, you should provide an insert statement through using()");
 
-            AbstractSSTableSimpleWriter writer = sorted
-                                               ? new SSTableSimpleWriter(directory, schema, partitioner)
-                                               : new BufferedWriter(directory, schema, partitioner, bufferSizeInMB);
+            // TODO
+            throw new UnsupportedOperationException();
+            //AbstractSSTableSimpleWriter writer = sorted
+            //                                   ? new SSTableSimpleWriter(directory, schema, partitioner)
+            //                                   : new BufferedWriter(directory, schema, partitioner, bufferSizeInMB);
 
-            if (formatType != null)
-                writer.setSSTableFormatType(formatType);
+            //if (formatType != null)
+            //    writer.setSSTableFormatType(formatType);
 
-            return new CQLSSTableWriter(writer, insert, boundNames);
+            //return new CQLSSTableWriter(writer, insert, boundNames);
         }
     }
 
@@ -538,35 +544,38 @@ public class CQLSSTableWriter implements Closeable
      * a tweaked ColumnFamily object that calls back the proper method after each added cell
      * so we sync when we should.
      */
-    private static class BufferedWriter extends SSTableSimpleUnsortedWriter
+    // TODO
+    private static class BufferedWriter //extends SSTableSimpleUnsortedWriter
     {
-        public BufferedWriter(File directory, CFMetaData metadata, IPartitioner partitioner, long bufferSizeInMB)
-        {
-            super(directory, metadata, partitioner, bufferSizeInMB);
-        }
+        //public BufferedWriter(File directory, CFMetaData metadata, IPartitioner partitioner, long bufferSizeInMB)
+        //{
+        //    super(directory, metadata, partitioner, bufferSizeInMB);
+        //}
 
-        @Override
-        protected ColumnFamily createColumnFamily()
-        {
-            return new ArrayBackedSortedColumns(metadata, false)
-            {
-                @Override
-                public void addColumn(Cell cell)
-                {
-                    super.addColumn(cell);
-                    try
-                    {
-                        countColumn(cell);
-                    }
-                    catch (IOException e)
-                    {
-                        // addColumn does not throw IOException but we want to report this to the user,
-                        // so wrap it in a temporary RuntimeException that we'll catch in rawAddRow above.
-                        throw new SyncException(e);
-                    }
-                }
-            };
-        }
+        //@Override
+        //protected PartitionUpdate createPartitionUpdate()
+        //{
+        //    // TODO
+        //    throw new UnsupportedOperationException();
+        //    //return new ArrayBackedSortedColumns(metadata, false)
+        //    //{
+        //    //    @Override
+        //    //    public void addColumn(Cell cell)
+        //    //    {
+        //    //        super.addColumn(cell);
+        //    //        try
+        //    //        {
+        //    //            countColumn(cell);
+        //    //        }
+        //    //        catch (IOException e)
+        //    //        {
+        //    //            // addColumn does not throw IOException but we want to report this to the user,
+        //    //            // so wrap it in a temporary RuntimeException that we'll catch in rawAddRow above.
+        //    //            throw new SyncException(e);
+        //    //        }
+        //    //    }
+        //    //};
+        //}
 
         protected void addColumn(Cell cell) throws IOException
         {

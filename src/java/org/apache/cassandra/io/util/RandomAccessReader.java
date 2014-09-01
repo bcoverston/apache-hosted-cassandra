@@ -249,19 +249,14 @@ public class RandomAccessReader extends AbstractDataInput implements FileDataInp
     @Override
     public void close()
     {
-        if (owner == null || buffer == null)
-        {
-            // The buffer == null check is so that if the pool owner has deallocated us, calling close()
-            // will re-call deallocate rather than recycling a deallocated object.
-            // I'd be more comfortable if deallocate didn't have to handle being idempotent like that,
-            // but RandomAccessFile.close will call AbstractInterruptibleChannel.close which will
-            // re-call RAF.close -- in this case, [C]RAR.close since we are overriding that.
+        // Makes close idempotent (even if we have an owner, we don't want to recycle a deallocated object)
+        if (buffer == null)
+            return;
+
+        if (owner == null)
             deallocate();
-        }
         else
-        {
             owner.recycle(this);
-        }
     }
 
     public void deallocate()

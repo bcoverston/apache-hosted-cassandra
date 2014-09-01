@@ -140,7 +140,7 @@ public class SingleColumnRelationTest extends CQLTester
 
         assertRows(execute("select * from %s where a = ? and c < ? and b in (?, ?)", "first", 7, 3, 2),
                    row("first", 2, 6, 2));
-//---
+
         assertRows(execute("select * from %s where a = ? and c >= ? and c <= ? and b in (?, ?)", "first", 6, 7, 3, 2),
                    row("first", 2, 6, 2),
                    row("first", 3, 7, 3));

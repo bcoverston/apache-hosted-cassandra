@@ -17,13 +17,16 @@
  */
 package org.apache.cassandra.db;
 
+import java.nio.ByteBuffer;
 import java.io.DataInput;
 import java.io.IOException;
 
-import org.apache.cassandra.db.composites.CellName;
-import org.apache.cassandra.db.composites.CellNameType;
-import org.apache.cassandra.db.composites.Composite;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.db.atoms.*;
+import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.format.Version;
+import org.apache.cassandra.net.MessagingService;
 
 /**
  * Helper class to deserialize OnDiskAtom efficiently.
@@ -33,96 +36,177 @@ import org.apache.cassandra.io.sstable.format.Version;
  * do more work than necessary (i.e. we don't allocate/deserialize
  * objects for things we don't care about).
  */
-public class AtomDeserializer
+public abstract class AtomDeserializer
 {
-    private final CellNameType type;
-    private final CellNameType.Deserializer nameDeserializer;
-    private final DataInput in;
-    private final ColumnSerializer.Flag flag;
-    private final int expireBefore;
-    private final Version version;
+    protected final CFMetaData metadata;
+    protected final DataInput in;
+    protected final SerializationHelper helper;
+    protected final Columns columns;
 
-    // The "flag" for the next name (which correspond to the "masks" in ColumnSerializer) if it has been
-    // read already, Integer.MIN_VALUE otherwise;
-    private int nextFlags = Integer.MIN_VALUE;
-
-    public AtomDeserializer(CellNameType type, DataInput in, ColumnSerializer.Flag flag, int expireBefore, Version version)
+    protected AtomDeserializer(CFMetaData metadata,
+                               DataInput in,
+                               SerializationHelper helper,
+                               Columns columns)
     {
-        this.type = type;
-        this.nameDeserializer = type.newDeserializer(in);
+        this.metadata = metadata;
         this.in = in;
-        this.flag = flag;
-        this.expireBefore = expireBefore;
-        this.version = version;
+        this.helper = helper;
+        this.columns = columns;
+    }
+
+    public static AtomDeserializer create(CFMetaData metadata,
+                                          DataInput in,
+                                          SerializationHeader header,
+                                          SerializationHelper helper,
+                                          Columns columns)
+    {
+        if (helper.version >= MessagingService.VERSION_30)
+            return new CurrentDeserializer(metadata, in, header, helper, columns);
+        else
+            throw new UnsupportedOperationException();
+            //return new LegacyLayout.LegacyAtomDeserializer(metadata, in, flag, expireBefore, version, columns);
     }
 
     /**
      * Whether or not there is more atom to read.
      */
-    public boolean hasNext() throws IOException
-    {
-        return nameDeserializer.hasNext();
-    }
+    public abstract boolean hasNext() throws IOException;
 
     /**
-     * Whether or not some atom has been read but not processed (neither readNext() nor
-     * skipNext() has been called for that atom) yet.
-     */
-    public boolean hasUnprocessed() throws IOException
-    {
-        return nameDeserializer.hasUnprocessed();
-    }
-
-    /**
-     * Compare the provided composite to the next atom to read on disk.
+     * Compare the provided bound to the next atom to read on disk.
      *
      * This will not read/deserialize the whole atom but only what is necessary for the
      * comparison. Whenever we know what to do with this atom (read it or skip it),
      * readNext or skipNext should be called.
      */
-    public int compareNextTo(Composite composite) throws IOException
-    {
-        return nameDeserializer.compareNextTo(composite);
-    }
+    public abstract int compareNextTo(Slice.Bound bound) throws IOException;
 
     /**
-     * Returns whether the next atom is a range tombstone or not.
-     *
-     * Please note that this should only be called after compareNextTo() has been called.
+     * Returns whether the next atom is a row or not.
      */
-    public boolean nextIsRangeTombstone() throws IOException
-    {
-        nextFlags = in.readUnsignedByte();
-        return (nextFlags & ColumnSerializer.RANGE_TOMBSTONE_MASK) != 0;
-    }
+    public abstract boolean nextIsRow() throws IOException;
 
     /**
      * Returns the next atom.
      */
-    public OnDiskAtom readNext() throws IOException
-    {
-        Composite name = nameDeserializer.readNext();
-        assert !name.isEmpty(); // This would imply hasNext() hasn't been called
+    public abstract Atom readNext() throws IOException;
 
-        nextFlags = nextFlags == Integer.MIN_VALUE ? in.readUnsignedByte() : nextFlags;
-        OnDiskAtom atom = (nextFlags & ColumnSerializer.RANGE_TOMBSTONE_MASK) != 0
-                        ? type.rangeTombstoneSerializer().deserializeBody(in, name, version)
-                        : type.columnSerializer().deserializeColumnBody(in, (CellName)name, nextFlags, flag, expireBefore);
-        nextFlags = Integer.MIN_VALUE;
-        return atom;
-    }
+    /**
+     * Clears any state in this deserializer.
+     */
+    public abstract void clearState() throws IOException;
 
     /**
      * Skips the next atom.
      */
-    public void skipNext() throws IOException
+    public abstract void skipNext() throws IOException;
+
+    private static class CurrentDeserializer extends AtomDeserializer
     {
-        nameDeserializer.skipNext();
-        nextFlags = nextFlags == Integer.MIN_VALUE ? in.readUnsignedByte() : nextFlags;
-        if ((nextFlags & ColumnSerializer.RANGE_TOMBSTONE_MASK) != 0)
-            type.rangeTombstoneSerializer().skipBody(in, version);
-        else
-            type.columnSerializer().skipColumnBody(in, nextFlags);
-        nextFlags = Integer.MIN_VALUE;
+        private final ClusteringPrefix.Deserializer clusteringDeserializer;
+        private final SerializationHeader header;
+
+        private int nextFlags;
+        private boolean isReady;
+        private boolean isDone;
+
+        private final ReusableRow row;
+        private final ReusableRangeTombstoneMarker marker;
+
+        private CurrentDeserializer(CFMetaData metadata,
+                                    DataInput in,
+                                    SerializationHeader header,
+                                    SerializationHelper helper,
+                                    Columns columns)
+        {
+            super(metadata, in, helper, columns);
+            this.header = header;
+            this.clusteringDeserializer = new ClusteringPrefix.Deserializer(metadata.comparator, in, header);
+            this.row = new ReusableRow(metadata.clusteringColumns().size(), header.columns().regulars, helper.nowInSec);
+            this.marker = new ReusableRangeTombstoneMarker(metadata.clusteringColumns().size());
+        }
+
+        public boolean hasNext() throws IOException
+        {
+            if (isReady)
+                return true;
+
+            prepareNext();
+            return !isDone;
+        }
+
+        private void prepareNext() throws IOException
+        {
+            if (isDone)
+                return;
+
+            nextFlags = in.readUnsignedByte();
+            if (AtomSerializer.isEndOfPartition(nextFlags))
+            {
+                isDone = true;
+                isReady = false;
+                return;
+            }
+
+            clusteringDeserializer.prepare(nextFlags);
+            isReady = true;
+        }
+
+        public int compareNextTo(Slice.Bound bound) throws IOException
+        {
+            if (!isReady)
+                prepareNext();
+
+            assert !isDone;
+
+            return clusteringDeserializer.compareNextTo(bound);
+        }
+
+        public boolean nextIsRow() throws IOException
+        {
+            if (!isReady)
+                prepareNext();
+
+            return AtomSerializer.kind(nextFlags) == Atom.Kind.ROW;
+        }
+
+        public Atom readNext() throws IOException
+        {
+            isReady = false;
+            if (AtomSerializer.kind(nextFlags) == Atom.Kind.RANGE_TOMBSTONE_MARKER)
+            {
+                RangeTombstoneMarker.Writer writer = marker.writer();
+                clusteringDeserializer.deserializeNextBound(writer);
+                AtomSerializer.serializer.deserializeMarkerBody(in, header, helper, nextFlags, writer);
+                return marker;
+            }
+            else
+            {
+                Row.Writer writer = row.writer();
+                clusteringDeserializer.deserializeNextClustering(writer);
+                AtomSerializer.serializer.deserializeRowBody(in, header, helper, columns, nextFlags, writer);
+                return row;
+            }
+        }
+
+        public void skipNext() throws IOException
+        {
+            isReady = false;
+            clusteringDeserializer.skipNext();
+            if (AtomSerializer.kind(nextFlags) == Atom.Kind.RANGE_TOMBSTONE_MARKER)
+            {
+                AtomSerializer.serializer.skipMarkerBody(in, header, nextFlags);
+            }
+            else
+            {
+                AtomSerializer.serializer.skipRowBody(in, header, helper, nextFlags);
+            }
+        }
+
+        public void clearState()
+        {
+            isReady = false;
+            isDone = false;
+        }
     }
 }

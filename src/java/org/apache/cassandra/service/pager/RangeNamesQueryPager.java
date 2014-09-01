@@ -20,7 +20,9 @@ package org.apache.cassandra.service.pager;
 import java.util.List;
 
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.filter.NamesQueryFilter;
+import org.apache.cassandra.db.atoms.*;
+import org.apache.cassandra.db.partitions.*;
+import org.apache.cassandra.db.filter.*;
 import org.apache.cassandra.dht.*;
 import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.service.StorageProxy;
@@ -37,25 +39,25 @@ import org.apache.cassandra.service.StorageService;
  */
 public class RangeNamesQueryPager extends AbstractQueryPager
 {
-    private final RangeSliceCommand command;
+    private final PartitionRangeReadCommand command;
     private volatile DecoratedKey lastReturnedKey;
 
     // Don't use directly, use QueryPagers method instead
-    RangeNamesQueryPager(RangeSliceCommand command, ConsistencyLevel consistencyLevel, boolean localQuery)
+    RangeNamesQueryPager(PartitionRangeReadCommand command, ConsistencyLevel consistencyLevel, boolean localQuery)
     {
-        super(consistencyLevel, command.maxResults, localQuery, command.keyspace, command.columnFamily, command.predicate, command.timestamp);
+        super(consistencyLevel, localQuery, command.metadata(), command.limits());
         this.command = command;
-        assert columnFilter instanceof NamesQueryFilter && ((NamesQueryFilter)columnFilter).countCQL3Rows();
+        assert command.isNamesQuery();
     }
 
-    RangeNamesQueryPager(RangeSliceCommand command, ConsistencyLevel consistencyLevel, boolean localQuery, PagingState state)
+    RangeNamesQueryPager(PartitionRangeReadCommand command, ConsistencyLevel consistencyLevel, boolean localQuery, PagingState state)
     {
         this(command, consistencyLevel, localQuery);
 
         if (state != null)
         {
             lastReturnedKey = StorageService.getPartitioner().decorateKey(state.partitionKey);
-            restoreState(state.remaining, true);
+            restoreState(state.remaining, state.remainingInPartition);
         }
     }
 
@@ -63,44 +65,29 @@ public class RangeNamesQueryPager extends AbstractQueryPager
     {
         return lastReturnedKey == null
              ? null
-             : new PagingState(lastReturnedKey.getKey(), null, maxRemaining());
+             : new PagingState(lastReturnedKey.getKey(), null, maxRemaining(), remainingInPartition());
     }
 
-    protected List<Row> queryNextPage(int pageSize, ConsistencyLevel consistencyLevel, boolean localQuery)
+    protected DataIterator queryNextPage(int pageSize, ConsistencyLevel consistencyLevel, boolean localQuery)
     throws RequestExecutionException
     {
-        AbstractRangeCommand pageCmd = command.withUpdatedLimit(pageSize);
+        PartitionRangeReadCommand pageCmd = command.withUpdatedLimit(command.limits().forPaging(pageSize));
         if (lastReturnedKey != null)
             pageCmd = pageCmd.forSubRange(makeExcludingKeyBounds(lastReturnedKey));
 
-        return localQuery
-             ? pageCmd.executeLocally()
-             : StorageProxy.getRangeSlice(pageCmd, consistencyLevel);
+        return localQuery ? pageCmd.executeLocally() : pageCmd.execute(consistencyLevel, null);
     }
 
-    protected boolean containsPreviousLast(Row first)
+    protected void recordLast(DecoratedKey key, Row last)
     {
-        // When querying the next page, we create a bound that exclude the lastReturnedKey
-        return false;
-    }
-
-    protected boolean recordLast(Row last)
-    {
-        lastReturnedKey = last.key;
-        // We return false as that means "can that last be in the next query?"
-        return false;
-    }
-
-    protected boolean isReversed()
-    {
-        return false;
+        lastReturnedKey = key;
     }
 
     private AbstractBounds<RowPosition> makeExcludingKeyBounds(RowPosition lastReturnedKey)
     {
         // We return a range that always exclude lastReturnedKey, since we've already
         // returned it.
-        AbstractBounds<RowPosition> bounds = command.keyRange;
+        AbstractBounds<RowPosition> bounds = command.dataRange().keyRange();
         if (bounds instanceof Range || bounds instanceof Bounds)
         {
             return new Range<RowPosition>(lastReturnedKey, bounds.right);

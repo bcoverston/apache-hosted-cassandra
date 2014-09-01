@@ -19,14 +19,15 @@ package org.apache.cassandra.cql3;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
+import com.google.common.collect.Iterators;
+
 import org.apache.cassandra.config.ColumnDefinition;
-import org.apache.cassandra.db.Cell;
-import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.composites.CellName;
-import org.apache.cassandra.db.composites.Composite;
+import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.atoms.*;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.ListType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
@@ -294,16 +295,31 @@ public abstract class Lists
             super(column, t);
         }
 
-        public void execute(ByteBuffer rowKey, ColumnFamily cf, Composite prefix, UpdateParameters params) throws InvalidRequestException
+        public void execute(DecoratedKey partitionKey, Clustering clustering, Row.Writer writer, UpdateParameters params) throws InvalidRequestException
         {
+            // delete + append
             if (column.type.isMultiCell())
-            {
-                // delete + append
-                CellName name = cf.getComparator().create(prefix, column);
-                cf.addAtom(params.makeTombstoneForOverwrite(name.slice()));
-            }
-            Appender.doAppend(t, cf, prefix, column, params);
+                params.setComplexDeletionTimeForOverwrite(column, writer);
+            Appender.doAppend(t, clustering, writer, column, params);
         }
+    }
+
+    private static int existingSize(Row row, ColumnDefinition column)
+    {
+        if (row == null)
+            return 0;
+
+        Iterator<Cell> cells = row.getCells(column);
+        return cells == null ? 0 : Iterators.size(cells);
+    }
+
+    private static Cell existingElement(Row row, ColumnDefinition column, int idx)
+    {
+        assert row != null;
+        Iterator<Cell> cells = row.getCells(column);
+        assert cells != null;
+
+        return Iterators.get(cells, idx);
     }
 
     public static class SetterByIndex extends Operation
@@ -329,7 +345,7 @@ public abstract class Lists
             idx.collectMarkerSpecification(boundNames);
         }
 
-        public void execute(ByteBuffer rowKey, ColumnFamily cf, Composite prefix, UpdateParameters params) throws InvalidRequestException
+        public void execute(DecoratedKey partitionKey, Clustering clustering, Row.Writer writer, UpdateParameters params) throws InvalidRequestException
         {
             // we should not get here for frozen lists
             assert column.type.isMultiCell() : "Attempted to set an individual element on a frozen list";
@@ -340,15 +356,16 @@ public abstract class Lists
             if (index == null)
                 throw new InvalidRequestException("Invalid null value for list index");
 
-            List<Cell> existingList = params.getPrefetchedList(rowKey, column.name);
+            Row existingRow = params.getPrefetchedRow(partitionKey, clustering);
+            int existingSize = existingSize(existingRow, column);
             int idx = ByteBufferUtil.toInt(index);
-            if (idx < 0 || idx >= existingList.size())
-                throw new InvalidRequestException(String.format("List index %d out of bound, list has size %d", idx, existingList.size()));
+            if (idx < 0 || idx >= existingSize)
+                throw new InvalidRequestException(String.format("List index %d out of bound, list has size %d", idx, existingSize));
 
-            CellName elementName = existingList.get(idx).name();
+            CellPath elementPath = existingElement(existingRow, column, idx).path();
             if (value == null)
             {
-                cf.addColumn(params.makeTombstone(elementName));
+                params.addTombstone(column, writer);
             }
             else
             {
@@ -358,7 +375,7 @@ public abstract class Lists
                                                                     FBUtilities.MAX_UNSIGNED_SHORT,
                                                                     value.remaining()));
 
-                cf.addColumn(params.makeColumn(elementName, value));
+                params.addCell(clustering, column, writer, elementPath, value);
             }
         }
     }
@@ -370,13 +387,13 @@ public abstract class Lists
             super(column, t);
         }
 
-        public void execute(ByteBuffer rowKey, ColumnFamily cf, Composite prefix, UpdateParameters params) throws InvalidRequestException
+        public void execute(DecoratedKey partitionKey, Clustering clustering, Row.Writer writer, UpdateParameters params) throws InvalidRequestException
         {
             assert column.type.isMultiCell() : "Attempted to append to a frozen list";
-            doAppend(t, cf, prefix, column, params);
+            doAppend(t, clustering, writer, column, params);
         }
 
-        static void doAppend(Term t, ColumnFamily cf, Composite prefix, ColumnDefinition column, UpdateParameters params) throws InvalidRequestException
+        static void doAppend(Term t, Clustering clustering, Row.Writer writer, ColumnDefinition column, UpdateParameters params) throws InvalidRequestException
         {
             Term.Terminal value = t.bind(params.options);
             Lists.Value listValue = (Lists.Value)value;
@@ -391,17 +408,16 @@ public abstract class Lists
                 for (int i = 0; i < toAdd.size(); i++)
                 {
                     ByteBuffer uuid = ByteBuffer.wrap(UUIDGen.getTimeUUIDBytes());
-                    cf.addColumn(params.makeColumn(cf.getComparator().create(prefix, column, uuid), toAdd.get(i)));
+                    params.addCell(clustering, column, writer, CellPath.create(uuid), toAdd.get(i));
                 }
             }
             else
             {
                 // for frozen lists, we're overwriting the whole cell value
-                CellName name = cf.getComparator().create(prefix, column);
                 if (value == null)
-                    cf.addAtom(params.makeTombstone(name));
+                    params.addTombstone(column, writer);
                 else
-                    cf.addColumn(params.makeColumn(name, listValue.getWithProtocolVersion(Server.CURRENT_VERSION)));
+                    params.addCell(clustering, column, writer, listValue.getWithProtocolVersion(Server.CURRENT_VERSION));
             }
         }
     }
@@ -413,7 +429,7 @@ public abstract class Lists
             super(column, t);
         }
 
-        public void execute(ByteBuffer rowKey, ColumnFamily cf, Composite prefix, UpdateParameters params) throws InvalidRequestException
+        public void execute(DecoratedKey partitionKey, Clustering clustering, Row.Writer writer, UpdateParameters params) throws InvalidRequestException
         {
             assert column.type.isMultiCell() : "Attempted to prepend to a frozen list";
             Term.Terminal value = t.bind(params.options);
@@ -428,7 +444,7 @@ public abstract class Lists
             {
                 PrecisionTime pt = PrecisionTime.getNext(time);
                 ByteBuffer uuid = ByteBuffer.wrap(UUIDGen.getTimeUUIDBytes(pt.millis, pt.nanos));
-                cf.addColumn(params.makeColumn(cf.getComparator().create(prefix, column, uuid), toAdd.get(i)));
+                params.addCell(clustering, column, writer, CellPath.create(uuid), toAdd.get(i));
             }
         }
     }
@@ -446,17 +462,16 @@ public abstract class Lists
             return true;
         }
 
-        public void execute(ByteBuffer rowKey, ColumnFamily cf, Composite prefix, UpdateParameters params) throws InvalidRequestException
+        public void execute(DecoratedKey partitionKey, Clustering clustering, Row.Writer writer, UpdateParameters params) throws InvalidRequestException
         {
             assert column.type.isMultiCell() : "Attempted to delete from a frozen list";
-            List<Cell> existingList = params.getPrefetchedList(rowKey, column.name);
+
             // We want to call bind before possibly returning to reject queries where the value provided is not a list.
             Term.Terminal value = t.bind(params.options);
 
-            if (existingList.isEmpty())
-                return;
-
-            if (value == null)
+            Row existingRow = params.getPrefetchedRow(partitionKey, clustering);
+            Iterator<Cell> cells = existingRow.getCells(column);
+            if (value == null || cells == null)
                 return;
 
             assert value instanceof Lists.Value;
@@ -466,10 +481,11 @@ public abstract class Lists
             // the read-before-write this operation requires limits its usefulness on big lists, so in practice
             // toDiscard will be small and keeping a list will be more efficient.
             List<ByteBuffer> toDiscard = ((Lists.Value)value).elements;
-            for (Cell cell : existingList)
+            while (cells.hasNext())
             {
+                Cell cell = cells.next();
                 if (toDiscard.contains(cell.value()))
-                    cf.addColumn(params.makeTombstone(cell.name()));
+                    params.addTombstone(column, writer, cell.path());
             }
         }
     }
@@ -487,20 +503,20 @@ public abstract class Lists
             return true;
         }
 
-        public void execute(ByteBuffer rowKey, ColumnFamily cf, Composite prefix, UpdateParameters params) throws InvalidRequestException
+        public void execute(DecoratedKey partitionKey, Clustering clustering, Row.Writer writer, UpdateParameters params) throws InvalidRequestException
         {
             assert column.type.isMultiCell() : "Attempted to delete an item by index from a frozen list";
             Term.Terminal index = t.bind(params.options);
             if (index == null)
                 throw new InvalidRequestException("Invalid null value for list index");
 
-            List<Cell> existingList = params.getPrefetchedList(rowKey, column.name);
+            Row existingRow = params.getPrefetchedRow(partitionKey, clustering);
+            int existingSize = existingSize(existingRow, column);
             int idx = ByteBufferUtil.toInt(index.get(params.options));
-            if (idx < 0 || idx >= existingList.size())
-                throw new InvalidRequestException(String.format("List index %d out of bound, list has size %d", idx, existingList.size()));
+            if (idx < 0 || idx >= existingSize)
+                throw new InvalidRequestException(String.format("List index %d out of bound, list has size %d", idx, existingSize));
 
-            CellName elementName = existingList.get(idx).name();
-            cf.addColumn(params.makeTombstone(elementName));
+            params.addTombstone(column, writer, existingElement(existingRow, column, idx).path());
         }
     }
 }

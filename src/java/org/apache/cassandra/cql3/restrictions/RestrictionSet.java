@@ -22,7 +22,7 @@ import java.util.*;
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.restrictions.SingleColumnRestriction.Contains;
-import org.apache.cassandra.db.IndexExpression;
+import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 
@@ -63,12 +63,10 @@ final class RestrictionSet implements Restrictions, Iterable<Restriction>
     }
 
     @Override
-    public final void addIndexExpressionTo(List<IndexExpression> expressions,
-                                           SecondaryIndexManager indexManager,
-                                           QueryOptions options) throws InvalidRequestException
+    public final void addColumnFilterTo(ColumnFilter filter, SecondaryIndexManager indexManager, QueryOptions options) throws InvalidRequestException
     {
         for (Restriction restriction : restrictions.values())
-            restriction.addIndexExpressionTo(expressions, indexManager, options);
+            restriction.addColumnFilterTo(filter, indexManager, options);
     }
 
     @Override

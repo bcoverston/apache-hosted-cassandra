@@ -19,8 +19,10 @@ package org.apache.cassandra.db.index;
 
 import java.nio.ByteBuffer;
 
+import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.atoms.*;
 import org.apache.cassandra.utils.concurrent.OpOrder;
-import org.apache.cassandra.db.Cell;
 import org.apache.cassandra.utils.FBUtilities;
 
 /**
@@ -35,12 +37,26 @@ public abstract class PerColumnSecondaryIndex extends SecondaryIndex
      * @param rowKey the underlying row key which is indexed
      * @param col all the column info
      */
-    public abstract void delete(ByteBuffer rowKey, Cell col, OpOrder.Group opGroup);
+    public abstract void delete(ByteBuffer rowKey, Clustering clustering, Cell cell, OpOrder.Group opGroup, int nowInSec);
 
     /**
      * Called when a column has been removed due to a cleanup operation.
      */
-    public abstract void deleteForCleanup(ByteBuffer rowKey, Cell col, OpOrder.Group opGroup);
+    public abstract void deleteForCleanup(ByteBuffer rowKey, Clustering clustering, Cell cell, OpOrder.Group opGroup, int nowInSec);
+
+    /**
+     * For indexes on the primary key, index the given PK.
+     */
+    public void maybeIndex(ByteBuffer partitionKey, Clustering clustering, long timestamp, int ttl, OpOrder.Group opGroup, int nowInSec)
+    {
+    }
+
+    /**
+     * For indexes on the primary key, delete the given PK.
+     */
+    public void maybeDelete(ByteBuffer partitionKey, Clustering clustering, DeletionTime deletion, OpOrder.Group opGroup, int nowInSec)
+    {
+    }
 
     /**
      * insert a column to the index
@@ -48,7 +64,7 @@ public abstract class PerColumnSecondaryIndex extends SecondaryIndex
      * @param rowKey the underlying row key which is indexed
      * @param col all the column info
      */
-    public abstract void insert(ByteBuffer rowKey, Cell col, OpOrder.Group opGroup);
+    public abstract void insert(ByteBuffer rowKey, Clustering clustering, Cell cell, OpOrder.Group opGroup, int nowInSec);
 
     /**
      * update a column from the index
@@ -57,15 +73,10 @@ public abstract class PerColumnSecondaryIndex extends SecondaryIndex
      * @param oldCol the previous column info
      * @param col all the column info
      */
-    public abstract void update(ByteBuffer rowKey, Cell oldCol, Cell col, OpOrder.Group opGroup);
+    public abstract void update(ByteBuffer rowKey, Clustering clustering, Cell oldCell, Cell cell, OpOrder.Group opGroup, int nowInSec);
 
     public String getNameForSystemKeyspace(ByteBuffer column)
     {
         return getIndexName();
-    }
-
-    public boolean validate(Cell cell)
-    {
-        return cell.value().remaining() < FBUtilities.MAX_UNSIGNED_SHORT;
     }
 }

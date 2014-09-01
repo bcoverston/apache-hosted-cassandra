@@ -137,8 +137,7 @@ public class ColumnIdentifier extends org.apache.cassandra.cql3.selection.Select
 
         public ColumnIdentifier prepare(CFMetaData cfm)
         {
-            AbstractType<?> comparator = cfm.comparator.asAbstractType();
-            if (cfm.getIsDense() || comparator instanceof CompositeType || comparator instanceof UTF8Type)
+            if (cfm.columnNameComparator instanceof UTF8Type)
                 return new ColumnIdentifier(text, true);
 
             // We have a Thrift-created table with a non-text comparator.  We need to parse column names with the comparator
@@ -150,7 +149,7 @@ public class ColumnIdentifier extends org.apache.cassandra.cql3.selection.Select
                 if (def.name.bytes.equals(bufferName))
                     return new ColumnIdentifier(text, true);
             }
-            return new ColumnIdentifier(comparator.fromString(rawText), text);
+            return new ColumnIdentifier(cfm.columnNameComparator.fromString(rawText), text);
         }
 
         public boolean processesSelection()

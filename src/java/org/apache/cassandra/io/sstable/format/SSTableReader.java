@@ -41,10 +41,8 @@ import org.apache.cassandra.concurrent.DebuggableThreadPoolExecutor;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.columniterator.OnDiskAtomIterator;
+import org.apache.cassandra.db.atoms.*;
 import org.apache.cassandra.db.commitlog.ReplayPosition;
-import org.apache.cassandra.db.composites.CellName;
-import org.apache.cassandra.db.filter.ColumnSlice;
 import org.apache.cassandra.db.index.SecondaryIndex;
 import org.apache.cassandra.dht.*;
 import org.apache.cassandra.io.compress.CompressionMetadata;
@@ -192,6 +190,8 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
     // not final since we need to be able to change level on a file.
     protected volatile StatsMetadata sstableMetadata;
 
+    public final SerializationHeader header;
+
     protected final AtomicLong keyCacheHit = new AtomicLong(0);
     protected final AtomicLong keyCacheRequest = new AtomicLong(0);
 
@@ -321,7 +321,8 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
             String parentName = descriptor.cfname.substring(0, i);
             CFMetaData parent = Schema.instance.getCFMetaData(descriptor.ksname, parentName);
             ColumnDefinition def = parent.getColumnDefinitionForIndex(descriptor.cfname.substring(i + 1));
-            metadata = CFMetaData.newIndexMetadata(parent, def, SecondaryIndex.getIndexComparator(parent, def));
+            ClusteringComparator cc = SecondaryIndex.getIndexComparator(parent, def);
+            metadata = CFMetaData.newIndexMetadata(parent, def, cc);
         }
         else
         {
@@ -364,10 +365,12 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
         assert components.contains(Component.DATA) : "Data component is missing for sstable" + descriptor;
         assert components.contains(Component.PRIMARY_INDEX) : "Primary index component is missing for sstable " + descriptor;
 
-        Map<MetadataType, MetadataComponent> sstableMetadata = descriptor.getMetadataSerializer().deserialize(descriptor,
-                EnumSet.of(MetadataType.VALIDATION, MetadataType.STATS));
+        EnumSet<MetadataType> types = EnumSet.of(MetadataType.VALIDATION, MetadataType.STATS, MetadataType.HEADER);
+        Map<MetadataType, MetadataComponent> sstableMetadata = descriptor.getMetadataSerializer().deserialize(descriptor, types);
+
         ValidationMetadata validationMetadata = (ValidationMetadata) sstableMetadata.get(MetadataType.VALIDATION);
         StatsMetadata statsMetadata = (StatsMetadata) sstableMetadata.get(MetadataType.STATS);
+        SerializationHeader.Component header = (SerializationHeader.Component) sstableMetadata.get(MetadataType.HEADER);
 
         // Check if sstable is created using same partitioner.
         // Partitioner can be null, which indicates older version of sstable or no stats available.
@@ -381,8 +384,14 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
         }
 
         logger.info("Opening {} ({} bytes)", descriptor, new File(descriptor.filenameFor(Component.DATA)).length());
-        SSTableReader sstable = internalOpen(descriptor, components, metadata, partitioner, System.currentTimeMillis(),
-                statsMetadata, OpenReason.NORMAL);
+        SSTableReader sstable = internalOpen(descriptor,
+                                             components,
+                                             metadata,
+                                             partitioner,
+                                             System.currentTimeMillis(),
+                                             statsMetadata,
+                                             OpenReason.NORMAL,
+                                             header.toHeader(metadata));
 
         // special implementation of load to use non-pooled SegmentedFile builders
         SegmentedFile.Builder ibuilder = new BufferedSegmentedFile.Builder();
@@ -408,10 +417,12 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
         assert components.contains(Component.DATA) : "Data component is missing for sstable" + descriptor;
         assert components.contains(Component.PRIMARY_INDEX) : "Primary index component is missing for sstable " + descriptor;
 
-        Map<MetadataType, MetadataComponent> sstableMetadata = descriptor.getMetadataSerializer().deserialize(descriptor,
-                EnumSet.of(MetadataType.VALIDATION, MetadataType.STATS));
+        EnumSet<MetadataType> types = EnumSet.of(MetadataType.VALIDATION, MetadataType.STATS, MetadataType.HEADER);
+        Map<MetadataType, MetadataComponent> sstableMetadata = descriptor.getMetadataSerializer().deserialize(descriptor, types);
         ValidationMetadata validationMetadata = (ValidationMetadata) sstableMetadata.get(MetadataType.VALIDATION);
         StatsMetadata statsMetadata = (StatsMetadata) sstableMetadata.get(MetadataType.STATS);
+        SerializationHeader.Component header = (SerializationHeader.Component) sstableMetadata.get(MetadataType.HEADER);
+        assert !descriptor.version.storeRows() || header != null;
 
         // Check if sstable is created using same partitioner.
         // Partitioner can be null, which indicates older version of sstable or no stats available.
@@ -425,8 +436,14 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
         }
 
         logger.info("Opening {} ({} bytes)", descriptor, new File(descriptor.filenameFor(Component.DATA)).length());
-        SSTableReader sstable = internalOpen(descriptor, components, metadata, partitioner, System.currentTimeMillis(),
-                statsMetadata, OpenReason.NORMAL);
+        SSTableReader sstable = internalOpen(descriptor,
+                                             components,
+                                             metadata,
+                                             partitioner,
+                                             System.currentTimeMillis(),
+                                             statsMetadata,
+                                             OpenReason.NORMAL,
+                                             header == null ? null : header.toHeader(metadata));
 
         // load index and filter
         long start = System.nanoTime();
@@ -507,11 +524,12 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
                                       IFilter bf,
                                       long maxDataAge,
                                       StatsMetadata sstableMetadata,
-                                      OpenReason openReason)
+                                      OpenReason openReason,
+                                      SerializationHeader header)
     {
         assert desc != null && partitioner != null && ifile != null && dfile != null && isummary != null && bf != null && sstableMetadata != null;
 
-        SSTableReader reader = internalOpen(desc, components, metadata, partitioner, maxDataAge, sstableMetadata, openReason);
+        SSTableReader reader = internalOpen(desc, components, metadata, partitioner, maxDataAge, sstableMetadata, openReason, header);
 
         reader.bf = bf;
         reader.ifile = ifile;
@@ -529,11 +547,12 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
                                             IPartitioner partitioner,
                                             Long maxDataAge,
                                             StatsMetadata sstableMetadata,
-                                            OpenReason openReason)
+                                            OpenReason openReason,
+                                            SerializationHeader header)
     {
         Factory readerFactory = descriptor.getFormat().getReaderFactory();
 
-        return readerFactory.open(descriptor, components, metadata, partitioner, maxDataAge, sstableMetadata, openReason);
+        return readerFactory.open(descriptor, components, metadata, partitioner, maxDataAge, sstableMetadata, openReason, header);
     }
 
     protected SSTableReader(final Descriptor desc,
@@ -542,13 +561,15 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
                             IPartitioner partitioner,
                             long maxDataAge,
                             StatsMetadata sstableMetadata,
-                            OpenReason openReason)
+                            OpenReason openReason,
+                            SerializationHeader header)
     {
         super(desc, components, metadata, partitioner);
         this.sstableMetadata = sstableMetadata;
+        this.header = header;
         this.maxDataAge = maxDataAge;
         this.openReason = openReason;
-        this.rowIndexEntrySerializer = descriptor.version.getSSTableFormat().getIndexSerializer(metadata);
+        this.rowIndexEntrySerializer = descriptor.version.getSSTableFormat().getIndexSerializer(metadata, desc.version, header);
     }
 
     public static long getTotalBytes(Iterable<SSTableReader> sstables)
@@ -711,12 +732,12 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
             try (IndexSummaryBuilder summaryBuilder = summaryLoaded ? null : new IndexSummaryBuilder(estimatedKeys, metadata.getMinIndexInterval(), samplingLevel))
             {
                 long indexPosition;
-                RowIndexEntry.IndexSerializer rowIndexSerializer = descriptor.getFormat().getIndexSerializer(metadata);
+                RowIndexEntry.IndexSerializer rowIndexSerializer = descriptor.getFormat().getIndexSerializer(metadata, descriptor.version, header);
 
                 while ((indexPosition = primaryIndex.getFilePointer()) != indexSize)
                 {
                     ByteBuffer key = ByteBufferUtil.readWithShortLength(primaryIndex);
-                    RowIndexEntry indexEntry = rowIndexSerializer.deserialize(primaryIndex, descriptor.version);
+                    RowIndexEntry indexEntry = rowIndexSerializer.deserialize(primaryIndex);
                     DecoratedKey decoratedKey = partitioner.decorateKey(key);
                     if (first == null)
                         first = decoratedKey;
@@ -904,8 +925,8 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
         {
             assert openReason != OpenReason.EARLY;
             SSTableReader replacement = internalOpen(descriptor, components, metadata, partitioner, ifile.sharedCopy(),
-                                                          dfile.sharedCopy(), indexSummary.sharedCopy(), bf.sharedCopy(),
-                                                          maxDataAge, sstableMetadata, OpenReason.MOVED_START);
+                                                     dfile.sharedCopy(), indexSummary.sharedCopy(), bf.sharedCopy(),
+                                                     maxDataAge, sstableMetadata, OpenReason.MOVED_START, header);
             // TODO: make data/index start accurate for compressed files
             // TODO: merge with caller's firstKeyBeyond() work,to save time
             if (newStart.compareTo(first) > 0)
@@ -948,7 +969,7 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
 
             SSTableReader replacement = internalOpen(descriptor, components, metadata, partitioner, ifile.sharedCopy(),
                                                           dfile.sharedCopy(), indexSummary.sharedCopy(), bf.sharedCopy(),
-                                                          maxDataAge, sstableMetadata, OpenReason.SHADOWED);
+                                                          maxDataAge, sstableMetadata, OpenReason.SHADOWED, header);
             replacement.first = first;
             replacement.last = last;
             setReplacedBy(replacement);
@@ -1011,7 +1032,7 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
 
             SSTableReader replacement = internalOpen(descriptor, components, metadata, partitioner, ifile.sharedCopy(),
                                                      dfile.sharedCopy(), newSummary, bf.sharedCopy(), maxDataAge,
-                                                     sstableMetadata, OpenReason.METADATA_CHANGE);
+                                                     sstableMetadata, OpenReason.METADATA_CHANGE, header);
             replacement.first = this.first;
             replacement.last = this.last;
             setReplacedBy(replacement);
@@ -1135,7 +1156,9 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
 
         //We need the parent cf metadata
         String cfName = metadata.isSecondaryIndex() ? metadata.getParentColumnFamilyName() : metadata.cfName;
-        cmd.parameters.setLiveMetadata(Schema.instance.getCFMetaData(metadata.ksName, cfName));
+        CFMetaData liveMetadata = Schema.instance.getCFMetaData(metadata.ksName, cfName);
+        if (cmd.parameters != liveMetadata.compressionParameters)
+            cmd.parameters.setLiveMetadata(liveMetadata);
 
         return cmd;
     }
@@ -1423,13 +1446,8 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
      */
     protected abstract RowIndexEntry getPosition(RowPosition key, Operator op, boolean updateCacheAndStats, boolean permitMatchPastLast);
 
-    //Corresponds to a name column
-    public abstract OnDiskAtomIterator iterator(DecoratedKey key, SortedSet<CellName> columns);
-    public abstract OnDiskAtomIterator iterator(FileDataInput file, DecoratedKey key, SortedSet<CellName> columns, RowIndexEntry indexEntry);
-
-    //Corresponds to a slice query
-    public abstract OnDiskAtomIterator iterator(DecoratedKey key, ColumnSlice[] slices, boolean reverse);
-    public abstract OnDiskAtomIterator iterator(FileDataInput file, DecoratedKey key, ColumnSlice[] slices, boolean reversed, RowIndexEntry indexEntry);
+    public abstract SliceableAtomIterator iterator(DecoratedKey key, PartitionColumns selectedColumns, boolean reversed, int nowInSec);
+    public abstract SliceableAtomIterator iterator(FileDataInput file, DecoratedKey key, RowIndexEntry indexEntry, PartitionColumns selectedColumns, boolean reversed, int nowInSec);
 
     /**
      * Finds and returns the first key beyond a given token in this SSTable or null if no such key exists.
@@ -1535,14 +1553,9 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
      * I/O SSTableScanner
      * @return A Scanner for seeking over the rows of the SSTable.
      */
-    public ISSTableScanner getScanner()
+    public ISSTableScanner getScanner(int nowInSec)
     {
-        return getScanner((RateLimiter) null);
-    }
-
-    public ISSTableScanner getScanner(RateLimiter limiter)
-    {
-        return getScanner(DataRange.allData(partitioner), limiter);
+        return getScanner((RateLimiter) null, nowInSec);
     }
 
     /**
@@ -1550,9 +1563,9 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
      * @param dataRange filter to use when reading the columns
      * @return A Scanner for seeking over the rows of the SSTable.
      */
-    public ISSTableScanner getScanner(DataRange dataRange)
+    public ISSTableScanner getScanner(DataRange dataRange, int nowInSec)
     {
-        return getScanner(dataRange, null);
+        return getScanner(dataRange, null, nowInSec);
     }
 
     /**
@@ -1561,12 +1574,19 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
      * @param range the range of keys to cover
      * @return A Scanner for seeking over the rows of the SSTable.
      */
-    public ISSTableScanner getScanner(Range<Token> range, RateLimiter limiter)
+    public ISSTableScanner getScanner(Range<Token> range, RateLimiter limiter, int nowInSec)
     {
         if (range == null)
-            return getScanner(limiter);
-        return getScanner(Collections.singletonList(range), limiter);
+            return getScanner(limiter, nowInSec);
+        return getScanner(Collections.singletonList(range), limiter, nowInSec);
     }
+
+    /**
+     * Direct I/O SSTableScanner over the entirety of the sstable..
+     *
+     * @return A Scanner over the full content of the SSTable.
+     */
+    public abstract ISSTableScanner getScanner(RateLimiter limiter, int nowInSec);
 
     /**
      * Direct I/O SSTableScanner over a defined collection of ranges of tokens.
@@ -1574,14 +1594,14 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
      * @param ranges the range of keys to cover
      * @return A Scanner for seeking over the rows of the SSTable.
      */
-    public abstract ISSTableScanner getScanner(Collection<Range<Token>> ranges, RateLimiter limiter);
+    public abstract ISSTableScanner getScanner(Collection<Range<Token>> ranges, RateLimiter limiter, int nowInSec);
 
     /**
      *
      * @param dataRange filter to use when reading the columns
      * @return A Scanner for seeking over the rows of the SSTable.
      */
-    public abstract ISSTableScanner getScanner(DataRange dataRange, RateLimiter limiter);
+    public abstract ISSTableScanner getScanner(DataRange dataRange, RateLimiter limiter, int expireBefore);
 
 
 
@@ -1717,6 +1737,43 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
         return sstableMetadata.maxTimestamp;
     }
 
+    public int getMinLocalDeletionTime()
+    {
+        return sstableMetadata.minLocalDeletionTime;
+    }
+
+    public int getMaxLocalDeletionTime()
+    {
+        return sstableMetadata.maxLocalDeletionTime;
+    }
+
+    public int getMinTTL()
+    {
+        return sstableMetadata.minTTL;
+    }
+
+    public int getMaxTTL()
+    {
+        return sstableMetadata.maxTTL;
+    }
+
+    public long getTotalColumnsSet()
+    {
+        return sstableMetadata.totalColumnsSet;
+    }
+
+    public long getTotalRows()
+    {
+        return sstableMetadata.totalRows;
+    }
+
+    public int getAvgColumnSetPerRow()
+    {
+        return sstableMetadata.totalRows < 0
+             ? -1
+             : (sstableMetadata.totalRows == 0 ? 0 : (int)(sstableMetadata.totalColumnsSet / sstableMetadata.totalRows));
+    }
+
     public Set<Integer> getAncestors()
     {
         try
@@ -1804,6 +1861,34 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
     {
         if (readMeter != null)
             readMeter.mark();
+    }
+
+    /**
+     * Checks if this sstable can overlap with another one based on the min/man clustering values.
+     * If this methods return false, we're guarantee that {@code this} and {@code other} have no overlapping
+     * data, i.e. no cells to reconcile.
+     */
+    public boolean mayOverlapsWith(SSTableReader other)
+    {
+        StatsMetadata m1 = getSSTableMetadata();
+        StatsMetadata m2 = other.getSSTableMetadata();
+
+        if (m1.minClusteringValues.isEmpty() || m1.maxClusteringValues.isEmpty() || m2.minClusteringValues.isEmpty() || m2.maxClusteringValues.isEmpty())
+            return true;
+
+        return !(compare(m1.maxClusteringValues, m2.minClusteringValues) < 0 || compare(m1.minClusteringValues, m2.maxClusteringValues) > 0);
+    }
+
+    private int compare(List<ByteBuffer> values1, List<ByteBuffer> values2)
+    {
+        ClusteringComparator comparator = metadata.comparator;
+        for (int i = 0; i < Math.min(values1.size(), values2.size()); i++)
+        {
+            int cmp = comparator.subtype(i).compare(values1.get(i), values2.get(i));
+            if (cmp != 0)
+                return cmp;
+        }
+        return 0;
     }
 
     public static class SizeComparator implements Comparator<SSTableReader>
@@ -2105,7 +2190,8 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
                                            IPartitioner partitioner,
                                            Long maxDataAge,
                                            StatsMetadata sstableMetadata,
-                                           OpenReason openReason);
+                                           OpenReason openReason,
+                                           SerializationHeader header);
 
     }
 }

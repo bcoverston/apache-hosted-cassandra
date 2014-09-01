@@ -18,14 +18,23 @@
 
 package org.apache.cassandra.io.sstable.format;
 
+import java.io.DataInput;
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
+
 import com.google.common.collect.Sets;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
-import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.RowIndexEntry;
-import org.apache.cassandra.db.compaction.AbstractCompactedRow;
+import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.atoms.AtomIterator;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
@@ -34,14 +43,6 @@ import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.utils.Pair;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.io.DataInput;
-import java.io.IOException;
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.Set;
 
 /**
  * This is the API all table writers must implement.
@@ -73,31 +74,39 @@ public abstract class SSTableWriter extends SSTable
     protected final long keyCount;
     protected final MetadataCollector metadataCollector;
     protected final RowIndexEntry.IndexSerializer rowIndexEntrySerializer;
+    protected final SerializationHeader header;
 
-    protected SSTableWriter(Descriptor descriptor, long keyCount, long repairedAt, CFMetaData metadata, IPartitioner partitioner, MetadataCollector metadataCollector)
+    protected SSTableWriter(Descriptor descriptor, long keyCount, long repairedAt, CFMetaData metadata, IPartitioner partitioner, MetadataCollector metadataCollector, SerializationHeader header)
     {
         super(descriptor, components(metadata), metadata, partitioner);
         this.keyCount = keyCount;
         this.repairedAt = repairedAt;
         this.metadataCollector = metadataCollector;
-        this.rowIndexEntrySerializer = descriptor.version.getSSTableFormat().getIndexSerializer(metadata);
+        this.header = header;
+        this.rowIndexEntrySerializer = descriptor.version.getSSTableFormat().getIndexSerializer(metadata, descriptor.version, header);
     }
 
-    public static SSTableWriter create(Descriptor descriptor, Long keyCount, Long repairedAt, CFMetaData metadata,  IPartitioner partitioner, MetadataCollector metadataCollector)
+    public static SSTableWriter create(Descriptor descriptor,
+                                       Long keyCount,
+                                       Long repairedAt,
+                                       CFMetaData metadata,
+                                       IPartitioner partitioner,
+                                       MetadataCollector metadataCollector,
+                                       SerializationHeader header)
     {
         Factory writerFactory = descriptor.getFormat().getWriterFactory();
-        return writerFactory.open(descriptor, keyCount, repairedAt, metadata, partitioner, metadataCollector);
+        return writerFactory.open(descriptor, keyCount, repairedAt, metadata, partitioner, metadataCollector, header);
     }
 
-    public static SSTableWriter create(Descriptor descriptor, long keyCount, long repairedAt)
+    public static SSTableWriter create(Descriptor descriptor, long keyCount, long repairedAt, SerializationHeader header)
     {
-        return create(descriptor, keyCount, repairedAt, 0);
+        return create(descriptor, keyCount, repairedAt, 0, header);
     }
 
-    public static SSTableWriter create(Descriptor descriptor, long keyCount, long repairedAt, int sstableLevel)
+    public static SSTableWriter create(Descriptor descriptor, long keyCount, long repairedAt, int sstableLevel, SerializationHeader header)
     {
         CFMetaData metadata = Schema.instance.getCFMetaData(descriptor);
-        return create(metadata, descriptor, keyCount, repairedAt, sstableLevel, DatabaseDescriptor.getPartitioner());
+        return create(metadata, descriptor, keyCount, repairedAt, sstableLevel, DatabaseDescriptor.getPartitioner(), header);
     }
 
     public static SSTableWriter create(CFMetaData metadata,
@@ -105,20 +114,21 @@ public abstract class SSTableWriter extends SSTable
                                        long keyCount,
                                        long repairedAt,
                                        int sstableLevel,
-                                       IPartitioner partitioner)
+                                       IPartitioner partitioner,
+                                       SerializationHeader header)
     {
         MetadataCollector collector = new MetadataCollector(metadata.comparator).sstableLevel(sstableLevel);
-        return create(descriptor, keyCount, repairedAt, metadata, partitioner, collector);
+        return create(descriptor, keyCount, repairedAt, metadata, partitioner, collector, header);
     }
 
-    public static SSTableWriter create(String filename, long keyCount, long repairedAt, int sstableLevel)
+    public static SSTableWriter create(String filename, long keyCount, long repairedAt, int sstableLevel, SerializationHeader header)
     {
-        return create(Descriptor.fromFilename(filename), keyCount, repairedAt, sstableLevel);
+        return create(Descriptor.fromFilename(filename), keyCount, repairedAt, sstableLevel, header);
     }
 
-    public static SSTableWriter create(String filename, long keyCount, long repairedAt)
+    public static SSTableWriter create(String filename, long keyCount, long repairedAt, SerializationHeader header)
     {
-        return create(Descriptor.fromFilename(filename), keyCount, repairedAt, 0);
+        return create(Descriptor.fromFilename(filename), keyCount, repairedAt, 0, header);
     }
 
     private static Set<Component> components(CFMetaData metadata)
@@ -146,19 +156,18 @@ public abstract class SSTableWriter extends SSTable
         return components;
     }
 
-
     public abstract void mark();
 
-
     /**
-     * @param row
-     * @return null if the row was compacted away entirely; otherwise, the PK index entry for this row
+     * Appends partition data to this writer.
+     *
+     * @param iterator the partition to write
+     * @return the created index entry if something was written, that is if {@code iterator}
+     * wasn't empty, {@code null} otherwise.
+     *
+     * @throws FSWriteError if a write to the dataFile fails
      */
-    public abstract RowIndexEntry append(AbstractCompactedRow row);
-
-    public abstract void append(DecoratedKey decoratedKey, ColumnFamily cf);
-
-    public abstract long appendFromStream(DecoratedKey key, CFMetaData metadata, DataInput in, Version version) throws IOException;
+    public abstract RowIndexEntry append(AtomIterator iterator);
 
     public abstract long getFilePointer();
 
@@ -217,6 +226,12 @@ public abstract class SSTableWriter extends SSTable
 
     public static abstract class Factory
     {
-        public abstract SSTableWriter open(Descriptor descriptor, long keyCount, long repairedAt, CFMetaData metadata, IPartitioner partitioner, MetadataCollector metadataCollector);
+        public abstract SSTableWriter open(Descriptor descriptor,
+                                           long keyCount,
+                                           long repairedAt,
+                                           CFMetaData metadata,
+                                           IPartitioner partitioner,
+                                           MetadataCollector metadataCollector,
+                                           SerializationHeader header);
     }
 }

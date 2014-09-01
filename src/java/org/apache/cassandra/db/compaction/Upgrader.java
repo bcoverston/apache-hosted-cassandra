@@ -74,7 +74,13 @@ public class Upgrader
                 sstableMetadataCollector.addAncestor(i);
         }
         sstableMetadataCollector.sstableLevel(sstable.getSSTableLevel());
-        return SSTableWriter.create(Descriptor.fromFilename(cfs.getTempSSTablePath(directory)), estimatedRows, repairedAt, cfs.metadata, cfs.partitioner, sstableMetadataCollector);
+        return SSTableWriter.create(Descriptor.fromFilename(cfs.getTempSSTablePath(directory)),
+                                    estimatedRows,
+                                    repairedAt,
+                                    cfs.metadata,
+                                    cfs.partitioner,
+                                    sstableMetadataCollector,
+                                    CompactionTask.makeSerializationHeader(cfs.metadata, Sets.newHashSet(sstable)));
     }
 
     public void upgrade()
@@ -82,15 +88,12 @@ public class Upgrader
         outputHandler.output("Upgrading " + sstable);
         Set<SSTableReader> toUpgrade = Sets.newHashSet(sstable);
         SSTableRewriter writer = new SSTableRewriter(cfs, toUpgrade, CompactionTask.getMaxDataAge(toUpgrade), true);
-        try (AbstractCompactionStrategy.ScannerList scanners = strategy.getScanners(toUpgrade))
+        try (AbstractCompactionStrategy.ScannerList scanners = strategy.getScanners(toUpgrade);
+             CompactionIterable iter = new CompactionIterable(compactionType, scanners.scanners, controller, DatabaseDescriptor.getSSTableFormat()))
         {
-            Iterator<AbstractCompactedRow> iter = new CompactionIterable(compactionType, scanners.scanners, controller, DatabaseDescriptor.getSSTableFormat()).iterator();
             writer.switchWriter(createCompactionWriter(sstable.getSSTableMetadata().repairedAt));
             while (iter.hasNext())
-            {
-                AbstractCompactedRow row = iter.next();
-                writer.append(row);
-            }
+                writer.append(iter.next());
 
             writer.finish();
             outputHandler.output("Upgrade of " + sstable + " complete.");

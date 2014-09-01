@@ -27,6 +27,7 @@ import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
+// TODO: rename to PartitionPosition
 public interface RowPosition extends RingPosition<RowPosition>
 {
     public static enum Kind

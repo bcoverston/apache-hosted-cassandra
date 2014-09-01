@@ -6,7 +6,6 @@
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
@@ -17,244 +16,395 @@
  */
 package org.apache.cassandra.db;
 
+import java.io.DataInput;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
-import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
-import org.apache.cassandra.db.composites.CellNameType;
-import org.apache.cassandra.db.composites.Composite;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.db.filter.*;
+import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.dht.*;
+import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.net.MessagingService;
 
 /**
- * Groups key range and column filter for range queries.
- *
- * The main "trick" of this class is that the column filter can only
- * be obtained by providing the row key on which the column filter will
- * be applied (which we always know before actually querying the columns).
- *
- * This allows the paging DataRange to return a filter for most rows but a
- * potentially different ones for the starting and stopping key. Could
- * allow more fancy stuff in the future too, like column filters that
- * depend on the actual key value :)
+ * Groups both the range of partitions to query, and the partition filter to
+ * apply for each partition (for a (partition) range query).
+ * <p>
+ * The main "trick" is that the partition filter can only be obtained by
+ * providing the partition key on which the filter will be applied. This is
+ * necessary when paging range queries, as we might need a different filter
+ * for the starting key than for other keys (because the previous page we had
+ * queried may have ended in the middle of a partition).
  */
 public class DataRange
 {
-    private final AbstractBounds<RowPosition> keyRange;
-    protected IDiskAtomFilter columnFilter;
-    protected final boolean selectFullRow;
+    public static final Serializer serializer = new Serializer();
 
-    public DataRange(AbstractBounds<RowPosition> range, IDiskAtomFilter columnFilter)
+    private final AbstractBounds<RowPosition> keyRange;
+    protected final PartitionFilter partitionFilter;
+
+    /**
+     * Creates a {@code DataRange} given a range of partition keys and a partition filter. The
+     * return {@code DataRange} will return the same filter for all keys.
+     *
+     * @param range the range over partition keys to use.
+     * @param partitionFilter the partition filter to use.
+     */
+    public DataRange(AbstractBounds<RowPosition> range, PartitionFilter partitionFilter)
     {
         this.keyRange = range;
-        this.columnFilter = columnFilter;
-        this.selectFullRow = columnFilter instanceof SliceQueryFilter
-                           ? isFullRowSlice((SliceQueryFilter)columnFilter)
-                           : false;
+        this.partitionFilter = partitionFilter;
     }
 
-    public static boolean isFullRowSlice(SliceQueryFilter filter)
+    /**
+     * Creates a {@code DataRange} to query all data (over the whole ring).
+     *
+     * @param metadata the table for which to create the {@code DataRange}.
+     * @param partitioner the partitioner in use for the table.
+     *
+     * @return the newly create {@code DataRange}.
+     */
+    public static DataRange allData(CFMetaData metadata, IPartitioner partitioner)
     {
-        return filter.slices.length == 1
-            && filter.start().isEmpty()
-            && filter.finish().isEmpty()
-            && filter.count == Integer.MAX_VALUE;
+        return forTokenRange(metadata, new Range<Token>(partitioner.getMinimumToken(), partitioner.getMinimumToken()));
     }
 
-    public static DataRange allData(IPartitioner partitioner)
+    /**
+     * Creates a {@code DataRange} to query all rows over the provided token range.
+     *
+     * @param metadata the table for which to create the {@code DataRange}.
+     * @param tokenRange the (partition key) token range to query.
+     *
+     * @return the newly create {@code DataRange}.
+     */
+    public static DataRange forTokenRange(CFMetaData metadata, Range<Token> tokenRange)
     {
-        return forTokenRange(new Range<Token>(partitioner.getMinimumToken(), partitioner.getMinimumToken()));
+        return forKeyRange(metadata, Range.makeRowRange(tokenRange));
     }
 
-    public static DataRange forTokenRange(Range<Token> keyRange)
+    /**
+     * Creates a {@code DataRange} to query all rows over the provided key range.
+     *
+     * @param metadata the table for which to create the {@code DataRange}.
+     * @param keyRange the (partition key) range to query.
+     *
+     * @return the newly create {@code DataRange}.
+     */
+    public static DataRange forKeyRange(CFMetaData metadata, Range<RowPosition> keyRange)
     {
-        return forKeyRange(Range.makeRowRange(keyRange));
+        return new DataRange(keyRange, PartitionFilters.fullPartitionFilter(metadata));
     }
 
-    public static DataRange forKeyRange(Range<RowPosition> keyRange)
+    /**
+     * Creates a {@code DataRange} to query all partitions of the ring using the provided
+     * partition filter.
+     *
+     * @param partitioner the partitioner in use for the table queried.
+     * @param filter the partition filter to use.
+     *
+     * @return the newly create {@code DataRange}.
+     */
+    public static DataRange allData(IPartitioner partitioner, PartitionFilter filter)
     {
-        return new DataRange(keyRange, new IdentityQueryFilter());
+        return new DataRange(Range.makeRowRange(new Range<Token>(partitioner.getMinimumToken(), partitioner.getMinimumToken())), filter);
     }
 
+    /**
+     * The range of partition key queried by this {@code DataRange}.
+     *
+     * @return the range of partition key queried by this {@code DataRange}.
+     */
     public AbstractBounds<RowPosition> keyRange()
     {
         return keyRange;
     }
 
+    /**
+     * The start of the partition key range queried by this {@code DataRange}.
+     *
+     * @return the start of the partition key range queried by this {@code DataRange}.
+     */
     public RowPosition startKey()
     {
         return keyRange.left;
     }
 
+    /**
+     * The end of the partition key range queried by this {@code DataRange}.
+     *
+     * @return the end of the partition key range queried by this {@code DataRange}.
+     */
     public RowPosition stopKey()
     {
         return keyRange.right;
     }
 
     /**
-     * Returns true if tombstoned partitions should not be included in results or count towards the limit.
-     * See CASSANDRA-8490 for more details on why this is needed (and done this way).
-     * */
-    public boolean ignoredTombstonedPartitions()
+     * Whether the underlying partition filter is a names filter or not.
+     *
+     * @return Whether the underlying partition filter is a names filter or not.
+     */
+    public boolean isNamesQuery()
     {
-        if (!(columnFilter instanceof SliceQueryFilter))
-            return false;
-
-        return ((SliceQueryFilter) columnFilter).compositesToGroup == SliceQueryFilter.IGNORE_TOMBSTONED_PARTITIONS;
+        return partitionFilter instanceof NamesPartitionFilter;
     }
 
-    // Whether the bounds of this DataRange actually wraps around.
+    /**
+     * The columns queried by the underlying partition filter.
+     *
+     * @return the columns queried by the underlying partition filter.
+     */
+    public PartitionColumns queriedColumns()
+    {
+        return partitionFilter.queriedColumns();
+    }
+
+    /**
+     * Whether the range queried by this {@code DataRange} actually wraps around.
+     *
+     * @return whether the range queried by this {@code DataRange} actually wraps around.
+     */
     public boolean isWrapAround()
     {
-        // On range can ever wrap
+        // Only range can ever wrap
         return keyRange instanceof Range && ((Range<?>)keyRange).isWrapAround();
     }
 
+    /**
+     * Whether the provided ring position is covered by this {@code DataRange}.
+     *
+     * @return whether the provided ring position is covered by this {@code DataRange}.
+     */
     public boolean contains(RowPosition pos)
     {
         return keyRange.contains(pos);
     }
 
-    public int getLiveCount(ColumnFamily data, long now)
+    /**
+     * Whether this {@code DataRange} queries everything (has no restriction neither on the
+     * partition queried, nor within the queried partition).
+     *
+     * @return Whether this {@code DataRange} queries everything.
+     */
+    public boolean isUnrestricted()
     {
-        return columnFilter instanceof SliceQueryFilter
-             ? ((SliceQueryFilter)columnFilter).lastCounted()
-             : columnFilter.getLiveCount(data, now);
-    }
-
-    public boolean selectsFullRowFor(ByteBuffer rowKey)
-    {
-        return selectFullRow;
+        return startKey().isMinimum() && stopKey().isMinimum() && partitionFilter.selectsAllPartition();
     }
 
     /**
-     * Returns a column filter that should be used for a particular row key.  Note that in the case of paging,
-     * slice starts and ends may change depending on the row key.
+     * The partition filter to use for the provided key.
+     * <p>
+     * This may or may not be the same filter for all keys (that is, paging range
+     * use a different filter for their start key).
+     *
+     * @param key the partition key for which we want the partition filter.
+     *
+     * @return the partition filter to use for {@code key}.
      */
-    public IDiskAtomFilter columnFilter(ByteBuffer rowKey)
+    public PartitionFilter partitionFilter(DecoratedKey key)
     {
-        return columnFilter;
+        return partitionFilter;
     }
 
     /**
-     * Sets a new limit on the number of (grouped) cells to fetch. This is currently only used when the query limit applies
-     * to CQL3 rows.
+     * Returns a new {@code DataRange} for use when paging {@code this} range.
+     *
+     * @param range the range of partition keys to query.
+     * @param comparator the comparator for the table queried.
+     * @param lastReturned the clustering for the last result returned by the previous page, i.e. the result we want to start our new page
+     * from. This last returned must <b>must</b> correspond to left bound of {@code range} (in other words, {@code range.left} must be the
+     * partition key for that {@code lastReturned} result).
+     *
+     * @return a new {@code DataRange} suitable for paging {@code this} range given the {@code lastRetuned} result of the previous page.
      */
-    public void updateColumnsLimit(int count)
+    public DataRange forPaging(AbstractBounds<RowPosition> range, ClusteringComparator comparator, Clustering lastReturned)
     {
-        columnFilter.updateColumnsLimit(count);
+        return new Paging(range, partitionFilter, comparator, lastReturned);
     }
 
-    public static class Paging extends DataRange
+    /**
+     * Returns a new {@code DataRange} equivalent to {@code this} one but restricted to the provided sub-range.
+     *
+     * @param range the sub-range to use for the newly returned data range. Note that assumes that {@code range} is a proper
+     * sub-range of the initial range but doesn't validate it. You should make sure to only provided sub-ranges however or this
+     * might throw off the paging case (see Paging.forSubRange()).
+     *
+     * @return a new {@code DataRange} using {@code range} as partition key range and the partition filter filter from {@code this}.
+     */
+    public DataRange forSubRange(AbstractBounds<RowPosition> range)
     {
-        // The slice of columns that we want to fetch for each row, ignoring page start/end issues.
-        private final SliceQueryFilter sliceFilter;
-        private final Comparator<Composite> comparator;
+        return new DataRange(range, partitionFilter);
+    }
 
-        // used to restrict the start of the slice for the first partition in the range
-        private final Composite firstPartitionColumnStart;
+    public String toString(CFMetaData metadata)
+    {
+        return String.format("range=%s pfilter=%s", keyRange.getString(metadata.getKeyValidator()), partitionFilter.toString(metadata));
+    }
 
-        // used to restrict the end of the slice for the last partition in the range
-        private final Composite lastPartitionColumnFinish;
+    public String toCQLString(CFMetaData metadata)
+    {
+        if (isUnrestricted())
+            return "UNRESTRICTED";
 
-        private Paging(AbstractBounds<RowPosition> range, SliceQueryFilter filter, Composite firstPartitionColumnStart, Composite lastPartitionColumnFinish, Comparator<Composite> comparator)
+        StringBuilder sb = new StringBuilder();
+
+        boolean needAnd = false;
+        if (!startKey().isMinimum())
+        {
+            appendClause(startKey(), sb, metadata, true, keyRange.isStartInclusive());
+            needAnd = true;
+        }
+        if (!stopKey().isMinimum())
+        {
+            if (needAnd)
+                sb.append(" AND ");
+            appendClause(stopKey(), sb, metadata, false, keyRange.isEndInclusive());
+        }
+
+        String filterString = partitionFilter.toCQLString(metadata);
+        if (!filterString.isEmpty())
+            sb.append(" AND ").append(filterString);
+
+        return sb.toString();
+    }
+
+    private void appendClause(RowPosition pos, StringBuilder sb, CFMetaData metadata, boolean isStart, boolean isInclusive)
+    {
+        sb.append("token(");
+        sb.append(ColumnDefinition.toCQLString(metadata.partitionKeyColumns()));
+        sb.append(") ").append(getOperator(isStart, isInclusive)).append(" ");
+        if (pos instanceof DecoratedKey)
+        {
+            sb.append("token(");
+            appendKeyString(sb, metadata.getKeyValidator(), ((DecoratedKey)pos).getKey());
+            sb.append(")");
+        }
+        else
+        {
+            sb.append(((Token.KeyBound)pos).getToken());
+        }
+    }
+
+    private static String getOperator(boolean isStart, boolean isInclusive)
+    {
+        return isStart
+             ? (isInclusive ? ">=" : ">")
+             : (isInclusive ? "<=" : "<");
+    }
+
+    // TODO: this is reused in SinglePartitionReadCommand but this should not really be here. Ideally
+    // we need a more "native" handling of composite partition keys.
+    public static void appendKeyString(StringBuilder sb, AbstractType<?> type, ByteBuffer key)
+    {
+        if (type instanceof CompositeType)
+        {
+            CompositeType ct = (CompositeType)type;
+            ByteBuffer[] values = ct.split(key);
+            for (int i = 0; i < ct.types.size(); i++)
+                sb.append(i == 0 ? "" : ", ").append(ct.types.get(i).getString(values[i]));
+        }
+        else
+        {
+            sb.append(type.getString(key));
+        }
+    }
+
+    /**
+     * Specialized {@code DataRange} used for the paging case.
+     * <p>
+     * It uses the clustering of the last result of the previous page to restrict the filter on the
+     * first queried partition (the one for that last result) so it only fetch results that follow that
+     * last result. In other words, this makes sure this resume paging where we left off.
+     */
+    private static class Paging extends DataRange
+    {
+        private final ClusteringComparator comparator;
+        private final Clustering lastReturned;
+
+        private Paging(AbstractBounds<RowPosition> range,
+                       PartitionFilter filter,
+                       ClusteringComparator comparator,
+                       Clustering lastReturned)
         {
             super(range, filter);
 
             // When using a paging range, we don't allow wrapped ranges, as it's unclear how to handle them properly.
-            // This is ok for now since we only need this in range slice queries, and the range are "unwrapped" in that case.
+            // This is ok for now since we only need this in range queries, and the range are "unwrapped" in that case.
             assert !(range instanceof Range) || !((Range<?>)range).isWrapAround() || range.right.isMinimum() : range;
+            assert lastReturned != null;
 
-            this.sliceFilter = filter;
             this.comparator = comparator;
-            this.firstPartitionColumnStart = firstPartitionColumnStart;
-            this.lastPartitionColumnFinish = lastPartitionColumnFinish;
-        }
-
-        public Paging(AbstractBounds<RowPosition> range, SliceQueryFilter filter, Composite columnStart, Composite columnFinish, CellNameType comparator)
-        {
-            this(range, filter, columnStart, columnFinish, filter.isReversed() ? comparator.reverseComparator() : comparator);
+            this.lastReturned = lastReturned;
         }
 
         @Override
-        public boolean selectsFullRowFor(ByteBuffer rowKey)
+        public PartitionFilter partitionFilter(DecoratedKey key)
         {
-            // If we initial filter is not the full filter, don't bother
-            if (!selectFullRow)
-                return false;
-
-            if (!equals(startKey(), rowKey) && !equals(stopKey(), rowKey))
-                return selectFullRow;
-
-            return isFullRowSlice((SliceQueryFilter)columnFilter(rowKey));
-        }
-
-        private boolean equals(RowPosition pos, ByteBuffer rowKey)
-        {
-            return pos instanceof DecoratedKey && ((DecoratedKey)pos).getKey().equals(rowKey);
+            return key.equals(startKey())
+                 ? partitionFilter.forPaging(comparator, lastReturned)
+                 : partitionFilter;
         }
 
         @Override
-        public IDiskAtomFilter columnFilter(ByteBuffer rowKey)
+        public DataRange forSubRange(AbstractBounds<RowPosition> range)
         {
-            /*
-             * We have that ugly hack that for slice queries, when we ask for
-             * the live count, we reach into the query filter to get the last
-             * counter number of columns to avoid recounting.
-             * Maybe we should just remove that hack, but in the meantime, we
-             * need to keep a reference the last returned filter.
-             */
-            columnFilter = equals(startKey(), rowKey) || equals(stopKey(), rowKey)
-                         ? sliceFilter.withUpdatedSlices(slicesForKey(rowKey))
-                         : sliceFilter;
-            return columnFilter;
+            // This is called for subrange of the initial range. So either it's the beginning of the initial range,
+            // and we need to preserver lastReturned, or it's not, and we don't care about it anymore.
+            return range.left.equals(keyRange().left)
+                 ? new Paging(range, partitionFilter, comparator, lastReturned)
+                 : new DataRange(range, partitionFilter);
         }
 
-        private ColumnSlice[] slicesForKey(ByteBuffer key)
+        @Override
+        public boolean isUnrestricted()
         {
-            // Also note that firstPartitionColumnStart and lastPartitionColumnFinish, when used, only "restrict" the filter slices,
-            // it doesn't expand on them. As such, we can ignore the case where they are empty and we do
-            // as it screw up with the logic below (see #6592)
-            Composite newStart = equals(startKey(), key) && !firstPartitionColumnStart.isEmpty() ? firstPartitionColumnStart : null;
-            Composite newFinish = equals(stopKey(), key) && !lastPartitionColumnFinish.isEmpty() ? lastPartitionColumnFinish : null;
+            return false;
+        }
+    }
 
-            List<ColumnSlice> newSlices = new ArrayList<ColumnSlice>(sliceFilter.slices.length); // in the common case, we'll have the same number of slices
+    public static class Serializer
+    {
+        public void serialize(DataRange range, DataOutputPlus out, int version, CFMetaData metadata) throws IOException
+        {
+            AbstractBounds.rowPositionSerializer.serialize(range.keyRange, out, version);
+            PartitionFilter.serializer.serialize(range.partitionFilter, out, version);
+            boolean isPaging = range instanceof Paging;
+            out.writeBoolean(isPaging);
+            if (isPaging)
+                Clustering.serializer.serialize(((Paging)range).lastReturned, out, version, metadata.comparator.subtypes());
+        }
 
-            for (ColumnSlice slice : sliceFilter.slices)
+        public DataRange deserialize(DataInput in, int version, CFMetaData metadata) throws IOException
+        {
+            AbstractBounds<RowPosition> range = AbstractBounds.rowPositionSerializer.deserialize(in, MessagingService.globalPartitioner(), version);
+            PartitionFilter filter = PartitionFilter.serializer.deserialize(in, version, metadata);
+            if (in.readBoolean())
             {
-                if (newStart != null)
-                {
-                    if (slice.isBefore(comparator, newStart))
-                        continue; // we skip that slice
-
-                    if (slice.includes(comparator, newStart))
-                        slice = new ColumnSlice(newStart, slice.finish);
-
-                    // Whether we've updated the slice or not, we don't have to bother about newStart anymore
-                    newStart = null;
-                }
-
-                assert newStart == null;
-                if (newFinish != null && !slice.isBefore(comparator, newFinish))
-                {
-                    if (slice.includes(comparator, newFinish))
-                        newSlices.add(new ColumnSlice(slice.start, newFinish));
-                    // In any case, we're done
-                    break;
-                }
-                newSlices.add(slice);
+                ClusteringComparator comparator = metadata.comparator;
+                Clustering lastReturned = Clustering.serializer.deserialize(in, version, comparator.subtypes());
+                return new Paging(range, filter, comparator, lastReturned);
             }
-
-            return newSlices.toArray(new ColumnSlice[newSlices.size()]);
+            else
+            {
+                return new DataRange(range, filter);
+            }
         }
 
-        @Override
-        public void updateColumnsLimit(int count)
+        public long serializedSize(DataRange range, int version, CFMetaData metadata)
         {
-            columnFilter.updateColumnsLimit(count);
-            sliceFilter.updateColumnsLimit(count);
+            long size = AbstractBounds.rowPositionSerializer.serializedSize(range.keyRange, version)
+                      + PartitionFilter.serializer.serializedSize(range.partitionFilter, version)
+                      + 1; // isPaging boolean
+
+            if (range instanceof Paging)
+                size += Clustering.serializer.serializedSize(((Paging)range).lastReturned, version, metadata.comparator.subtypes(), TypeSizes.NATIVE);
+            return size;
         }
     }
 }

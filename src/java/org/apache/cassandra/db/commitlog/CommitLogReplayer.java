@@ -47,6 +47,7 @@ import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.compress.CompressionParameters;
 import org.apache.cassandra.io.compress.ICompressor;
@@ -171,7 +172,7 @@ public class CommitLogReplayer
     
     abstract static class ReplayFilter
     {
-        public abstract Iterable<ColumnFamily> filter(Mutation mutation);
+        public abstract Iterable<PartitionUpdate> filter(Mutation mutation);
 
         public static ReplayFilter create()
         {
@@ -200,9 +201,9 @@ public class CommitLogReplayer
 
     private static class AlwaysReplayFilter extends ReplayFilter
     {
-        public Iterable<ColumnFamily> filter(Mutation mutation)
+        public Iterable<PartitionUpdate> filter(Mutation mutation)
         {
-            return mutation.getColumnFamilies();
+            return mutation.getPartitionUpdates();
         }
     }
 
@@ -215,17 +216,17 @@ public class CommitLogReplayer
             this.toReplay = toReplay;
         }
 
-        public Iterable<ColumnFamily> filter(Mutation mutation)
+        public Iterable<PartitionUpdate> filter(Mutation mutation)
         {
             final Collection<String> cfNames = toReplay.get(mutation.getKeyspaceName());
             if (cfNames == null)
                 return Collections.emptySet();
 
-            return Iterables.filter(mutation.getColumnFamilies(), new Predicate<ColumnFamily>()
+            return Iterables.filter(mutation.getPartitionUpdates(), new Predicate<PartitionUpdate>()
             {
-                public boolean apply(ColumnFamily cf)
+                public boolean apply(PartitionUpdate upd)
                 {
-                    return cfNames.contains(cf.metadata().cfName);
+                    return cfNames.contains(upd.metadata().cfName);
                 }
             });
         }
@@ -441,11 +442,10 @@ public class CommitLogReplayer
         {
             mutation = Mutation.serializer.deserialize(new DataInputStream(bufIn),
                                                        desc.getMessagingVersion(),
-                                                       ColumnSerializer.Flag.LOCAL);
+                                                       LegacyLayout.Flag.LOCAL);
             // doublecheck that what we read is [still] valid for the current schema
-            for (ColumnFamily cf : mutation.getColumnFamilies())
-                for (Cell cell : cf)
-                    cf.getComparator().validate(cell.name());
+            for (PartitionUpdate upd : mutation.getPartitionUpdates())
+                upd.validate();
         }
         catch (UnknownColumnFamilyException ex)
         {
@@ -481,7 +481,7 @@ public class CommitLogReplayer
         }
 
         if (logger.isDebugEnabled())
-            logger.debug("replaying mutation for {}.{}: {}", mutation.getKeyspaceName(), ByteBufferUtil.bytesToHex(mutation.key()), "{" + StringUtils.join(mutation.getColumnFamilies().iterator(), ", ") + "}");
+            logger.debug("replaying mutation for {}.{}: {}", mutation.getKeyspaceName(), mutation.key(), "{" + StringUtils.join(mutation.getPartitionUpdates().iterator(), ", ") + "}");
 
         Runnable runnable = new WrappedRunnable()
         {
@@ -500,12 +500,12 @@ public class CommitLogReplayer
                 // or c) are part of a cf that was dropped.
                 // Keep in mind that the cf.name() is suspect. do every thing based on the cfid instead.
                 Mutation newMutation = null;
-                for (ColumnFamily columnFamily : replayFilter.filter(mutation))
+                for (PartitionUpdate update : replayFilter.filter(mutation))
                 {
-                    if (Schema.instance.getCF(columnFamily.id()) == null)
+                    if (Schema.instance.getCF(update.metadata().cfId) == null)
                         continue; // dropped
 
-                    ReplayPosition rp = cfPositions.get(columnFamily.id());
+                    ReplayPosition rp = cfPositions.get(update.metadata().cfId);
 
                     // replay if current segment is newer than last flushed one or,
                     // if it is the last known segment, if we are after the replay position
@@ -513,7 +513,7 @@ public class CommitLogReplayer
                     {
                         if (newMutation == null)
                             newMutation = new Mutation(mutation.getKeyspaceName(), mutation.key());
-                        newMutation.add(columnFamily);
+                        newMutation.add(update);
                         replayedCount.incrementAndGet();
                     }
                 }
@@ -537,9 +537,9 @@ public class CommitLogReplayer
     {
         long restoreTarget = CommitLog.instance.archiver.restorePointInTime;
 
-        for (ColumnFamily families : fm.getColumnFamilies())
+        for (PartitionUpdate upd : fm.getPartitionUpdates())
         {
-            if (CommitLog.instance.archiver.precision.toMillis(families.maxTimestamp()) > restoreTarget)
+            if (CommitLog.instance.archiver.precision.toMillis(upd.maxTimestamp()) > restoreTarget)
                 return true;
         }
         return false;

@@ -29,6 +29,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.atoms.*;
+import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.context.CounterContext;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
@@ -42,7 +44,7 @@ public abstract class AbstractSSTableSimpleWriter implements Closeable
     protected final File directory;
     protected final CFMetaData metadata;
     protected DecoratedKey currentKey;
-    protected ColumnFamily columnFamily;
+    protected PartitionUpdate update;
     protected ByteBuffer currentSuperColumn;
     protected final CounterId counterid = CounterId.generate();
     private SSTableFormat.Type formatType = DatabaseDescriptor.getSSTableFormat();
@@ -63,7 +65,10 @@ public abstract class AbstractSSTableSimpleWriter implements Closeable
 
     protected SSTableWriter getWriter()
     {
-        return SSTableWriter.create(createDescriptor(directory, metadata.ksName, metadata.cfName, formatType), 0, ActiveRepairService.UNREPAIRED_SSTABLE);
+        return SSTableWriter.create(createDescriptor(directory, metadata.ksName, metadata.cfName, formatType),
+                                    0,
+                                    ActiveRepairService.UNREPAIRED_SSTABLE,
+                                    new SerializationHeader(metadata, metadata.partitionColumns(), AtomStats.NO_STATS, true));
     }
 
     protected static Descriptor createDescriptor(File directory, final String keyspace, final String columnFamily, final SSTableFormat.Type fmt)
@@ -107,11 +112,11 @@ public abstract class AbstractSSTableSimpleWriter implements Closeable
      */
     public void newRow(ByteBuffer key) throws IOException
     {
-        if (currentKey != null && !columnFamily.isEmpty())
-            writeRow(currentKey, columnFamily);
+        if (currentKey != null && !update.isEmpty())
+            writePartition(currentKey, update);
 
         currentKey = DatabaseDescriptor.getPartitioner().decorateKey(key);
-        columnFamily = getColumnFamily();
+        update = getPartitionUpdate();
     }
 
     /**
@@ -120,22 +125,28 @@ public abstract class AbstractSSTableSimpleWriter implements Closeable
      */
     public void newSuperColumn(ByteBuffer name)
     {
-        if (!columnFamily.metadata().isSuper())
+        if (!update.metadata().isSuper())
             throw new IllegalStateException("Cannot add a super column to a standard table");
 
         currentSuperColumn = name;
     }
 
-    protected void addColumn(Cell cell) throws IOException
+    protected void addColumn(ByteBuffer name, Cell cell) throws IOException
     {
-        if (columnFamily.metadata().isSuper())
-        {
-            if (currentSuperColumn == null)
-                throw new IllegalStateException("Trying to add a cell to a super column family, but no super cell has been started.");
+        // TODO: we would need to extract from name the actual column name and clustering
+        // maybe it's a good time to remove the simple writer in favor of just the
+        // CQLSStableWriter?
+        throw new UnsupportedOperationException();
 
-            cell = cell.withUpdatedName(columnFamily.getComparator().makeCellName(currentSuperColumn, cell.name().toByteBuffer()));
-        }
-        columnFamily.addColumn(cell);
+        //if (update.metadata().isSuper())
+        //{
+        //    if (currentSuperColumn == null)
+        //        throw new IllegalStateException("Trying to add a cell to a super column family, but no super cell has been started.");
+
+        //    cell = cell.withUpdatedName(columnFamily.getComparator().makeCellName(currentSuperColumn, cell.name().toByteBuffer()));
+        //}
+
+        //update.newRowUpdate(clustering).addCell(column, cell);
     }
 
     /**
@@ -146,7 +157,9 @@ public abstract class AbstractSSTableSimpleWriter implements Closeable
      */
     public void addColumn(ByteBuffer name, ByteBuffer value, long timestamp) throws IOException
     {
-        addColumn(new BufferCell(metadata.comparator.cellFromByteBuffer(name), value, timestamp));
+        // TODO
+        throw new UnsupportedOperationException();
+        //addColumn(name, Cells.create(value, timestamp, 0, null));
     }
 
     /**
@@ -161,7 +174,9 @@ public abstract class AbstractSSTableSimpleWriter implements Closeable
      */
     public void addExpiringColumn(ByteBuffer name, ByteBuffer value, long timestamp, int ttl, long expirationTimestampMS) throws IOException
     {
-        addColumn(new BufferExpiringCell(metadata.comparator.cellFromByteBuffer(name), value, timestamp, ttl, (int)(expirationTimestampMS / 1000)));
+        // TODO
+        throw new UnsupportedOperationException();
+        //addColumn(name, Cells.create(value, timestamp, ttl, (int)(expirationTimestampMS / 1000), null));
     }
 
     /**
@@ -171,18 +186,18 @@ public abstract class AbstractSSTableSimpleWriter implements Closeable
      */
     public void addCounterColumn(ByteBuffer name, long value) throws IOException
     {
-        addColumn(new BufferCounterCell(metadata.comparator.cellFromByteBuffer(name),
-                                        CounterContext.instance().createGlobal(counterid, 1L, value),
-                                        System.currentTimeMillis()));
+        // TODO
+        throw new UnsupportedOperationException();
+        //addColumn(name, Cells.createCounter(CounterContext.instance().createGlobal(counterid, 1L, value), System.currentTimeMillis()));
     }
 
     /**
      * Package protected for use by AbstractCQLSSTableWriter.
      * Not meant to be exposed publicly.
      */
-    ColumnFamily currentColumnFamily()
+    PartitionUpdate currentUpdate()
     {
-        return columnFamily;
+        return update;
     }
 
     /**
@@ -194,7 +209,7 @@ public abstract class AbstractSSTableSimpleWriter implements Closeable
         return currentKey;
     }
 
-    protected abstract void writeRow(DecoratedKey key, ColumnFamily columnFamily) throws IOException;
+    protected abstract void writePartition(DecoratedKey key, PartitionUpdate update) throws IOException;
 
-    protected abstract ColumnFamily getColumnFamily() throws IOException;
+    protected abstract PartitionUpdate getPartitionUpdate() throws IOException;
 }

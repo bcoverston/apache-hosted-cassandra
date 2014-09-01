@@ -344,7 +344,7 @@ public final class WrappingCompactionStrategy extends AbstractCompactionStrategy
     }
 
     @Override
-    public synchronized ScannerList getScanners(Collection<SSTableReader> sstables, Range<Token> range)
+    public synchronized ScannerList getScanners(Collection<SSTableReader> sstables, Range<Token> range, int nowInSec)
     {
         List<SSTableReader> repairedSSTables = new ArrayList<>();
         List<SSTableReader> unrepairedSSTables = new ArrayList<>();
@@ -353,8 +353,8 @@ public final class WrappingCompactionStrategy extends AbstractCompactionStrategy
                 repairedSSTables.add(sstable);
             else
                 unrepairedSSTables.add(sstable);
-        ScannerList repairedScanners = repaired.getScanners(repairedSSTables, range);
-        ScannerList unrepairedScanners = unrepaired.getScanners(unrepairedSSTables, range);
+        ScannerList repairedScanners = repaired.getScanners(repairedSSTables, range, nowInSec);
+        ScannerList unrepairedScanners = unrepaired.getScanners(unrepairedSSTables, range, nowInSec);
         List<ISSTableScanner> scanners = new ArrayList<>(repairedScanners.scanners.size() + unrepairedScanners.scanners.size());
         scanners.addAll(repairedScanners.scanners);
         scanners.addAll(unrepairedScanners.scanners);

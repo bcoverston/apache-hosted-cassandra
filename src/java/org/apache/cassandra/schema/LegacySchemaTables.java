@@ -36,18 +36,17 @@ import org.apache.cassandra.config.*;
 import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.cql3.functions.*;
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
-import org.apache.cassandra.db.composites.CellNameType;
-import org.apache.cassandra.db.composites.CellNames;
-import org.apache.cassandra.db.composites.Composite;
-import org.apache.cassandra.db.filter.QueryFilter;
+import org.apache.cassandra.db.atoms.*;
+import org.apache.cassandra.db.filter.*;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
 import org.apache.cassandra.db.marshal.*;
+import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.io.compress.CompressionParameters;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -100,6 +99,7 @@ public class LegacySchemaTables
                 + "default_time_to_live int,"
                 + "default_validator text,"
                 + "dropped_columns map<text, bigint>,"
+                + "dropped_columns_types map<text, text>,"
                 + "gc_grace_seconds int,"
                 + "is_dense boolean,"
                 + "key_validator text,"
@@ -202,29 +202,37 @@ public class LegacySchemaTables
 
     public static Collection<KSMetaData> readSchemaFromSystemTables()
     {
-        List<Row> serializedSchema = getSchemaPartitionsForTable(KEYSPACES);
-
-        List<KSMetaData> keyspaces = new ArrayList<>(serializedSchema.size());
-
-        for (Row partition : serializedSchema)
+        try (DataIterator serializedSchema = getSchemaPartitionsForTable(KEYSPACES))
         {
-            if (isEmptySchemaPartition(partition) || isSystemKeyspaceSchemaPartition(partition))
-                continue;
+            List<KSMetaData> keyspaces = new ArrayList<>();
 
-            keyspaces.add(createKeyspaceFromSchemaPartitions(partition,
-                                                             readSchemaPartitionForKeyspace(COLUMNFAMILIES, partition.key),
-                                                             readSchemaPartitionForKeyspace(USERTYPES, partition.key)));
+            while (serializedSchema.hasNext())
+            {
+                try (RowIterator partition = serializedSchema.next())
+                {
+                    if (isSystemKeyspaceSchemaPartition(partition))
+                        continue;
 
-            // Will be moved away in #6717
-            for (UDFunction function : createFunctionsFromFunctionsPartition(readSchemaPartitionForKeyspace(FUNCTIONS, partition.key)).values())
-                org.apache.cassandra.cql3.functions.Functions.addFunction(function);
+                    DecoratedKey key = partition.partitionKey();
+                    try (RowIterator tables = readSchemaPartitionForKeyspace(COLUMNFAMILIES, key);
+                         RowIterator types = readSchemaPartitionForKeyspace(USERTYPES, key);
+                         RowIterator functions = readSchemaPartitionForKeyspace(FUNCTIONS, key);
+                         RowIterator aggregates = readSchemaPartitionForKeyspace(AGGREGATES, key))
+                    {
+                        keyspaces.add(createKeyspaceFromSchemaPartitions(partition, tables, types));
 
-            // Will be moved away in #6717
-            for (UDAggregate aggregate : createAggregatesFromAggregatesPartition(readSchemaPartitionForKeyspace(AGGREGATES, partition.key)).values())
-                org.apache.cassandra.cql3.functions.Functions.addFunction(aggregate);
+                        // Will be moved away in #6717
+                        for (UDFunction function : createFunctionsFromFunctionsPartition(functions))
+                            org.apache.cassandra.cql3.functions.Functions.addFunction(function);
+
+                        // Will be moved away in #6717
+                        for (UDAggregate aggregate : createAggregatesFromAggregatesPartition(aggregates))
+                            org.apache.cassandra.cql3.functions.Functions.addFunction(aggregate);
+                    }
+                }
+            }
+            return keyspaces;
         }
-
-        return keyspaces;
     }
 
     public static void truncateSchemaTables()
@@ -257,18 +265,18 @@ public class LegacySchemaTables
 
         for (String table : ALL)
         {
-            for (Row partition : getSchemaPartitionsForTable(table))
+            try (DataIterator schema = getSchemaPartitionsForTable(table))
             {
-                if (isEmptySchemaPartition(partition) || isSystemKeyspaceSchemaPartition(partition))
-                    continue;
-
-                // we want to digest only live columns
-                ColumnFamilyStore.removeDeletedColumnsOnly(partition.cf, Integer.MAX_VALUE, SecondaryIndexManager.nullUpdater);
-                partition.cf.purgeTombstones(Integer.MAX_VALUE);
-                partition.cf.updateDigest(digest);
+                while (schema.hasNext())
+                {
+                    try (RowIterator partition = schema.next())
+                    {
+                        if (!isSystemKeyspaceSchemaPartition(partition))
+                            RowIterators.digest(partition, digest);
+                    }
+                }
             }
         }
-
         return UUID.nameUUIDFromBytes(digest.digest());
     }
 
@@ -285,14 +293,11 @@ public class LegacySchemaTables
      * @param schemaTableName The name of the table responsible for part of the schema.
      * @return low-level schema representation
      */
-    private static List<Row> getSchemaPartitionsForTable(String schemaTableName)
+    private static DataIterator getSchemaPartitionsForTable(String schemaTableName)
     {
-        Token minToken = StorageService.getPartitioner().getMinimumToken();
-        return getSchemaCFS(schemaTableName).getRangeSlice(new Range<RowPosition>(minToken.minKeyBound(), minToken.maxKeyBound()),
-                                                           null,
-                                                           new IdentityQueryFilter(),
-                                                           Integer.MAX_VALUE,
-                                                           System.currentTimeMillis());
+        ColumnFamilyStore cfs = getSchemaCFS(schemaTableName);
+        ReadCommand cmd = PartitionRangeReadCommand.allDataRead(cfs.metadata, FBUtilities.nowInSeconds());
+        return PartitionIterators.asDataIterator(cmd.executeLocally(cfs));
     }
 
     public static Collection<Mutation> convertSchemaToMutations()
@@ -307,31 +312,42 @@ public class LegacySchemaTables
 
     private static void convertSchemaToMutations(Map<DecoratedKey, Mutation> mutationMap, String schemaTableName)
     {
-        for (Row partition : getSchemaPartitionsForTable(schemaTableName))
+        try (DataIterator iter = getSchemaPartitionsForTable(schemaTableName))
         {
-            if (isSystemKeyspaceSchemaPartition(partition))
-                continue;
-
-            Mutation mutation = mutationMap.get(partition.key);
-            if (mutation == null)
+            while (iter.hasNext())
             {
-                mutation = new Mutation(SystemKeyspace.NAME, partition.key.getKey());
-                mutationMap.put(partition.key, mutation);
-            }
+                try (RowIterator partition = iter.next())
+                {
+                    if (isSystemKeyspaceSchemaPartition(partition))
+                        continue;
 
-            mutation.add(partition.cf);
+                    DecoratedKey key = partition.partitionKey();
+                    Mutation mutation = mutationMap.get(key);
+                    if (mutation == null)
+                    {
+                        mutation = new Mutation(SystemKeyspace.NAME, key);
+                        mutationMap.put(key, mutation);
+                    }
+
+                    mutation.add(RowIterators.toUpdate(partition));
+                }
+            }
         }
     }
 
-    private static Map<DecoratedKey, ColumnFamily> readSchemaForKeyspaces(String schemaTableName, Set<String> keyspaceNames)
+    private static Map<DecoratedKey, ReadPartition> readSchemaForKeyspaces(String schemaTableName, Set<String> keyspaceNames)
     {
-        Map<DecoratedKey, ColumnFamily> schema = new HashMap<>();
+        Map<DecoratedKey, ReadPartition> schema = new HashMap<>();
 
         for (String keyspaceName : keyspaceNames)
         {
-            Row schemaEntity = readSchemaPartitionForKeyspace(schemaTableName, keyspaceName);
-            if (schemaEntity.cf != null)
-                schema.put(schemaEntity.key, schemaEntity.cf);
+            // We don't to return the RowIterator directly because we should guarantee that this iterator
+            // will be closed, and putting it in a Map make that harder/more awkward.
+            try (RowIterator iter = readSchemaPartitionForKeyspace(schemaTableName, keyspaceName))
+            {
+                if (!RowIterators.isEmpty(iter))
+                    schema.put(iter.partitionKey(), ReadPartition.create(iter));
+            }
         }
 
         return schema;
@@ -342,35 +358,36 @@ public class LegacySchemaTables
         return AsciiType.instance.fromString(ksName);
     }
 
-    private static Row readSchemaPartitionForKeyspace(String schemaTableName, String keyspaceName)
+    private static DecoratedKey getSchemaKSDecoratedKey(String ksName)
     {
-        DecoratedKey keyspaceKey = StorageService.getPartitioner().decorateKey(getSchemaKSKey(keyspaceName));
-        return readSchemaPartitionForKeyspace(schemaTableName, keyspaceKey);
+        return StorageService.getPartitioner().decorateKey(getSchemaKSKey(ksName));
     }
 
-    private static Row readSchemaPartitionForKeyspace(String schemaTableName, DecoratedKey keyspaceKey)
+    private static RowIterator readSchemaPartitionForKeyspace(String schemaTableName, String keyspaceName)
     {
-        QueryFilter filter = QueryFilter.getIdentityFilter(keyspaceKey, schemaTableName, System.currentTimeMillis());
-        return new Row(keyspaceKey, getSchemaCFS(schemaTableName).getColumnFamily(filter));
+        return readSchemaPartitionForKeyspace(schemaTableName, getSchemaKSDecoratedKey(keyspaceName));
     }
 
-    private static Row readSchemaPartitionForTable(String schemaTableName, String keyspaceName, String tableName)
+    private static RowIterator readSchemaPartitionForKeyspace(String schemaTableName, DecoratedKey keyspaceKey)
     {
-        DecoratedKey key = StorageService.getPartitioner().decorateKey(getSchemaKSKey(keyspaceName));
+        ColumnFamilyStore schemaCFS = getSchemaCFS(schemaTableName);
+        return AtomIterators.asRowIterator(SinglePartitionReadCommand.fullPartitionRead(schemaCFS.metadata, FBUtilities.nowInSeconds(), keyspaceKey)
+                                                                     .queryMemtableAndDisk(schemaCFS));
+    }
+
+    private static RowIterator readSchemaPartitionForTable(String schemaTableName, String keyspaceName, String tableName)
+    {
         ColumnFamilyStore store = getSchemaCFS(schemaTableName);
-        Composite prefix = store.getComparator().make(tableName);
-        ColumnFamily cells = store.getColumnFamily(key, prefix, prefix.end(), false, Integer.MAX_VALUE, System.currentTimeMillis());
-        return new Row(key, cells);
+
+        ClusteringComparator comparator = store.metadata.comparator;
+        Slices slices = Slices.with(comparator, Slice.make(comparator, tableName));
+        return AtomIterators.asRowIterator(SinglePartitionSliceCommand.create(store.metadata, FBUtilities.nowInSeconds(), getSchemaKSDecoratedKey(keyspaceName), slices)
+                                                                      .queryMemtableAndDisk(store));
     }
 
-    private static boolean isEmptySchemaPartition(Row partition)
+    private static boolean isSystemKeyspaceSchemaPartition(RowIterator partition)
     {
-        return partition.cf == null || (partition.cf.isMarkedForDelete() && !partition.cf.hasColumns());
-    }
-
-    private static boolean isSystemKeyspaceSchemaPartition(Row partition)
-    {
-        return getSchemaKSKey(SystemKeyspace.NAME).equals(partition.key.getKey());
+        return getSchemaKSKey(SystemKeyspace.NAME).equals(partition.partitionKey().getKey());
     }
 
     /**
@@ -393,14 +410,14 @@ public class LegacySchemaTables
         // compare before/after schemas of the affected keyspaces only
         Set<String> keyspaces = new HashSet<>(mutations.size());
         for (Mutation mutation : mutations)
-            keyspaces.add(ByteBufferUtil.string(mutation.key()));
+            keyspaces.add(ByteBufferUtil.string(mutation.key().getKey()));
 
         // current state of the schema
-        Map<DecoratedKey, ColumnFamily> oldKeyspaces = readSchemaForKeyspaces(KEYSPACES, keyspaces);
-        Map<DecoratedKey, ColumnFamily> oldColumnFamilies = readSchemaForKeyspaces(COLUMNFAMILIES, keyspaces);
-        Map<DecoratedKey, ColumnFamily> oldTypes = readSchemaForKeyspaces(USERTYPES, keyspaces);
-        Map<DecoratedKey, ColumnFamily> oldFunctions = readSchemaForKeyspaces(FUNCTIONS, keyspaces);
-        Map<DecoratedKey, ColumnFamily> oldAggregates = readSchemaForKeyspaces(AGGREGATES, keyspaces);
+        Map<DecoratedKey, ReadPartition> oldKeyspaces = readSchemaForKeyspaces(KEYSPACES, keyspaces);
+        Map<DecoratedKey, ReadPartition> oldColumnFamilies = readSchemaForKeyspaces(COLUMNFAMILIES, keyspaces);
+        Map<DecoratedKey, ReadPartition> oldTypes = readSchemaForKeyspaces(USERTYPES, keyspaces);
+        Map<DecoratedKey, ReadPartition> oldFunctions = readSchemaForKeyspaces(FUNCTIONS, keyspaces);
+        Map<DecoratedKey, ReadPartition> oldAggregates = readSchemaForKeyspaces(AGGREGATES, keyspaces);
 
         for (Mutation mutation : mutations)
             mutation.apply();
@@ -409,11 +426,11 @@ public class LegacySchemaTables
             flushSchemaTables();
 
         // with new data applied
-        Map<DecoratedKey, ColumnFamily> newKeyspaces = readSchemaForKeyspaces(KEYSPACES, keyspaces);
-        Map<DecoratedKey, ColumnFamily> newColumnFamilies = readSchemaForKeyspaces(COLUMNFAMILIES, keyspaces);
-        Map<DecoratedKey, ColumnFamily> newTypes = readSchemaForKeyspaces(USERTYPES, keyspaces);
-        Map<DecoratedKey, ColumnFamily> newFunctions = readSchemaForKeyspaces(FUNCTIONS, keyspaces);
-        Map<DecoratedKey, ColumnFamily> newAggregates = readSchemaForKeyspaces(AGGREGATES, keyspaces);
+        Map<DecoratedKey, ReadPartition> newKeyspaces = readSchemaForKeyspaces(KEYSPACES, keyspaces);
+        Map<DecoratedKey, ReadPartition> newColumnFamilies = readSchemaForKeyspaces(COLUMNFAMILIES, keyspaces);
+        Map<DecoratedKey, ReadPartition> newTypes = readSchemaForKeyspaces(USERTYPES, keyspaces);
+        Map<DecoratedKey, ReadPartition> newFunctions = readSchemaForKeyspaces(FUNCTIONS, keyspaces);
+        Map<DecoratedKey, ReadPartition> newAggregates = readSchemaForKeyspaces(AGGREGATES, keyspaces);
 
         Set<String> keyspacesToDrop = mergeKeyspaces(oldKeyspaces, newKeyspaces);
         mergeTables(oldColumnFamilies, newColumnFamilies);
@@ -426,263 +443,187 @@ public class LegacySchemaTables
             Schema.instance.dropKeyspace(keyspaceToDrop);
     }
 
-    private static Set<String> mergeKeyspaces(Map<DecoratedKey, ColumnFamily> before, Map<DecoratedKey, ColumnFamily> after)
+    private static Set<String> mergeKeyspaces(Map<DecoratedKey, ReadPartition> before, Map<DecoratedKey, ReadPartition> after)
     {
-        List<Row> created = new ArrayList<>();
-        List<String> altered = new ArrayList<>();
-        Set<String> dropped = new HashSet<>();
-
-        /*
-         * - we don't care about entriesOnlyOnLeft() or entriesInCommon(), because only the changes are of interest to us
-         * - of all entriesOnlyOnRight(), we only care about ones that have live columns; it's possible to have a ColumnFamily
-         *   there that only has the top-level deletion, if:
-         *      a) a pushed DROP KEYSPACE change for a keyspace hadn't ever made it to this node in the first place
-         *      b) a pulled dropped keyspace that got dropped before it could find a way to this node
-         * - of entriesDiffering(), we don't care about the scenario where both pre and post-values have zero live columns:
-         *   that means that a keyspace had been recreated and dropped, and the recreated keyspace had never found a way
-         *   to this node
-         */
-        MapDifference<DecoratedKey, ColumnFamily> diff = Maps.difference(before, after);
-
-        for (Map.Entry<DecoratedKey, ColumnFamily> entry : diff.entriesOnlyOnRight().entrySet())
-            if (entry.getValue().hasColumns())
-                created.add(new Row(entry.getKey(), entry.getValue()));
-
-        for (Map.Entry<DecoratedKey, MapDifference.ValueDifference<ColumnFamily>> entry : diff.entriesDiffering().entrySet())
+        for (ReadPartition newPartition : after.values())
         {
-            String keyspaceName = AsciiType.instance.compose(entry.getKey().getKey());
-
-            ColumnFamily pre  = entry.getValue().leftValue();
-            ColumnFamily post = entry.getValue().rightValue();
-
-            if (pre.hasColumns() && post.hasColumns())
-                altered.add(keyspaceName);
-            else if (pre.hasColumns())
-                dropped.add(keyspaceName);
-            else if (post.hasColumns()) // a (re)created keyspace
-                created.add(new Row(entry.getKey(), post));
+            ReadPartition oldPartition = before.remove(newPartition.partitionKey());
+            if (oldPartition == null || oldPartition.isEmpty())
+            {
+                Schema.instance.addKeyspace(createKeyspaceFromSchemaPartition(newPartition.rowIterator()));
+            }
+            else
+            {
+                String name = AsciiType.instance.compose(newPartition.partitionKey().getKey());
+                Schema.instance.updateKeyspace(name);
+            }
         }
 
-        for (Row row : created)
-            Schema.instance.addKeyspace(createKeyspaceFromSchemaPartition(row));
-        for (String name : altered)
-            Schema.instance.updateKeyspace(name);
-        return dropped;
+        // What's remain in old is those keyspace that are not in updated, i.e. the dropped ones.
+        return asKeyspaceNamesSet(before.keySet());
     }
 
-    // see the comments for mergeKeyspaces()
-    private static void mergeTables(Map<DecoratedKey, ColumnFamily> before, Map<DecoratedKey, ColumnFamily> after)
+    private static Set<String> asKeyspaceNamesSet(Set<DecoratedKey> keys)
     {
-        List<CFMetaData> created = new ArrayList<>();
-        List<CFMetaData> altered = new ArrayList<>();
-        List<CFMetaData> dropped = new ArrayList<>();
-
-        MapDifference<DecoratedKey, ColumnFamily> diff = Maps.difference(before, after);
-
-        for (Map.Entry<DecoratedKey, ColumnFamily> entry : diff.entriesOnlyOnRight().entrySet())
-            if (entry.getValue().hasColumns())
-                created.addAll(createTablesFromTablesPartition(new Row(entry.getKey(), entry.getValue())).values());
-
-        for (Map.Entry<DecoratedKey, MapDifference.ValueDifference<ColumnFamily>> entry : diff.entriesDiffering().entrySet())
-        {
-            String keyspaceName = AsciiType.instance.compose(entry.getKey().getKey());
-
-            ColumnFamily pre  = entry.getValue().leftValue();
-            ColumnFamily post = entry.getValue().rightValue();
-
-            if (pre.hasColumns() && post.hasColumns())
-            {
-                MapDifference<String, CFMetaData> delta =
-                    Maps.difference(Schema.instance.getKSMetaData(keyspaceName).cfMetaData(),
-                                    createTablesFromTablesPartition(new Row(entry.getKey(), post)));
-
-                dropped.addAll(delta.entriesOnlyOnLeft().values());
-                created.addAll(delta.entriesOnlyOnRight().values());
-                Iterables.addAll(altered, Iterables.transform(delta.entriesDiffering().values(), new Function<MapDifference.ValueDifference<CFMetaData>, CFMetaData>()
-                {
-                    public CFMetaData apply(MapDifference.ValueDifference<CFMetaData> pair)
-                    {
-                        return pair.rightValue();
-                    }
-                }));
-            }
-            else if (pre.hasColumns())
-            {
-                dropped.addAll(Schema.instance.getKSMetaData(keyspaceName).cfMetaData().values());
-            }
-            else if (post.hasColumns())
-            {
-                created.addAll(createTablesFromTablesPartition(new Row(entry.getKey(), post)).values());
-            }
-        }
-
-        for (CFMetaData cfm : created)
-            Schema.instance.addTable(cfm);
-        for (CFMetaData cfm : altered)
-            Schema.instance.updateTable(cfm.ksName, cfm.cfName);
-        for (CFMetaData cfm : dropped)
-            Schema.instance.dropTable(cfm.ksName, cfm.cfName);
+        Set<String> names = new HashSet(keys.size());
+        for (DecoratedKey key : keys)
+            names.add(AsciiType.instance.compose(key.getKey()));
+        return names;
     }
 
-    // see the comments for mergeKeyspaces()
-    private static void mergeTypes(Map<DecoratedKey, ColumnFamily> before, Map<DecoratedKey, ColumnFamily> after)
+    private static void mergeTables(Map<DecoratedKey, ReadPartition> before, Map<DecoratedKey, ReadPartition> after)
     {
-        List<UserType> created = new ArrayList<>();
-        List<UserType> altered = new ArrayList<>();
-        List<UserType> dropped = new ArrayList<>();
-
-        MapDifference<DecoratedKey, ColumnFamily> diff = Maps.difference(before, after);
-
-        // New keyspace with types
-        for (Map.Entry<DecoratedKey, ColumnFamily> entry : diff.entriesOnlyOnRight().entrySet())
-            if (entry.getValue().hasColumns())
-                created.addAll(createTypesFromPartition(new Row(entry.getKey(), entry.getValue())).values());
-
-        for (Map.Entry<DecoratedKey, MapDifference.ValueDifference<ColumnFamily>> entry : diff.entriesDiffering().entrySet())
+        diffSchema(before, after, new Differ()
         {
-            String keyspaceName = AsciiType.instance.compose(entry.getKey().getKey());
-
-            ColumnFamily pre  = entry.getValue().leftValue();
-            ColumnFamily post = entry.getValue().rightValue();
-
-            if (pre.hasColumns() && post.hasColumns())
+            public void onDropped(UntypedResultSet.Row oldRow)
             {
-                MapDifference<ByteBuffer, UserType> delta =
-                    Maps.difference(Schema.instance.getKSMetaData(keyspaceName).userTypes.getAllTypes(),
-                                    createTypesFromPartition(new Row(entry.getKey(), post)));
+                Schema.instance.dropTable(oldRow.getString("keyspace_name"), oldRow.getString("columnfamily_name"));
+            }
 
-                dropped.addAll(delta.entriesOnlyOnLeft().values());
-                created.addAll(delta.entriesOnlyOnRight().values());
-                Iterables.addAll(altered, Iterables.transform(delta.entriesDiffering().values(), new Function<MapDifference.ValueDifference<UserType>, UserType>()
-                {
-                    public UserType apply(MapDifference.ValueDifference<UserType> pair)
-                    {
-                        return pair.rightValue();
-                    }
-                }));
-            }
-            else if (pre.hasColumns())
+            public void onAdded(UntypedResultSet.Row newRow)
             {
-                dropped.addAll(Schema.instance.getKSMetaData(keyspaceName).userTypes.getAllTypes().values());
+                Schema.instance.addTable(createTableFromTableRow(newRow));
             }
-            else if (post.hasColumns())
-            {
-                created.addAll(createTypesFromPartition(new Row(entry.getKey(), post)).values());
-            }
-        }
 
-        for (UserType type : created)
-            Schema.instance.addType(type);
-        for (UserType type : altered)
-            Schema.instance.updateType(type);
-        for (UserType type : dropped)
-            Schema.instance.dropType(type);
+            public void onUpdated(UntypedResultSet.Row oldRow, UntypedResultSet.Row newRow)
+            {
+                Schema.instance.updateTable(newRow.getString("keyspace_name"), newRow.getString("columnfamily_name"));
+            }
+        });
     }
 
-    // see the comments for mergeKeyspaces()
-    private static void mergeFunctions(Map<DecoratedKey, ColumnFamily> before, Map<DecoratedKey, ColumnFamily> after)
+    private static void mergeTypes(Map<DecoratedKey, ReadPartition> before, Map<DecoratedKey, ReadPartition> after)
     {
-        List<UDFunction> created = new ArrayList<>();
-        List<UDFunction> altered = new ArrayList<>();
-        List<UDFunction> dropped = new ArrayList<>();
-
-        MapDifference<DecoratedKey, ColumnFamily> diff = Maps.difference(before, after);
-
-        // New keyspace with functions
-        for (Map.Entry<DecoratedKey, ColumnFamily> entry : diff.entriesOnlyOnRight().entrySet())
-            if (entry.getValue().hasColumns())
-                created.addAll(createFunctionsFromFunctionsPartition(new Row(entry.getKey(), entry.getValue())).values());
-
-        for (Map.Entry<DecoratedKey, MapDifference.ValueDifference<ColumnFamily>> entry : diff.entriesDiffering().entrySet())
+        diffSchema(before, after, new Differ()
         {
-            ColumnFamily pre = entry.getValue().leftValue();
-            ColumnFamily post = entry.getValue().rightValue();
-
-            if (pre.hasColumns() && post.hasColumns())
+            public void onDropped(UntypedResultSet.Row oldRow)
             {
-                MapDifference<ByteBuffer, UDFunction> delta =
-                    Maps.difference(createFunctionsFromFunctionsPartition(new Row(entry.getKey(), pre)),
-                                    createFunctionsFromFunctionsPartition(new Row(entry.getKey(), post)));
+                Schema.instance.dropType(createTypeFromRow(oldRow));
+            }
 
-                dropped.addAll(delta.entriesOnlyOnLeft().values());
-                created.addAll(delta.entriesOnlyOnRight().values());
-                Iterables.addAll(altered, Iterables.transform(delta.entriesDiffering().values(), new Function<MapDifference.ValueDifference<UDFunction>, UDFunction>()
-                {
-                    public UDFunction apply(MapDifference.ValueDifference<UDFunction> pair)
-                    {
-                        return pair.rightValue();
-                    }
-                }));
-            }
-            else if (pre.hasColumns())
+            public void onAdded(UntypedResultSet.Row newRow)
             {
-                dropped.addAll(createFunctionsFromFunctionsPartition(new Row(entry.getKey(), pre)).values());
+                Schema.instance.addType(createTypeFromRow(newRow));
             }
-            else if (post.hasColumns())
-            {
-                created.addAll(createFunctionsFromFunctionsPartition(new Row(entry.getKey(), post)).values());
-            }
-        }
 
-        for (UDFunction udf : created)
-            Schema.instance.addFunction(udf);
-        for (UDFunction udf : altered)
-            Schema.instance.updateFunction(udf);
-        for (UDFunction udf : dropped)
-            Schema.instance.dropFunction(udf);
+            public void onUpdated(UntypedResultSet.Row oldRow, UntypedResultSet.Row newRow)
+            {
+                Schema.instance.updateType(createTypeFromRow(newRow));
+            }
+        });
     }
 
-    // see the comments for mergeKeyspaces()
-    private static void mergeAggregates(Map<DecoratedKey, ColumnFamily> before, Map<DecoratedKey, ColumnFamily> after)
+    private static void mergeFunctions(Map<DecoratedKey, ReadPartition> before, Map<DecoratedKey, ReadPartition> after)
     {
-        List<UDAggregate> created = new ArrayList<>();
-        List<UDAggregate> altered = new ArrayList<>();
-        List<UDAggregate> dropped = new ArrayList<>();
-
-        MapDifference<DecoratedKey, ColumnFamily> diff = Maps.difference(before, after);
-
-        // New keyspace with functions
-        for (Map.Entry<DecoratedKey, ColumnFamily> entry : diff.entriesOnlyOnRight().entrySet())
-            if (entry.getValue().hasColumns())
-                created.addAll(createAggregatesFromAggregatesPartition(new Row(entry.getKey(), entry.getValue())).values());
-
-        for (Map.Entry<DecoratedKey, MapDifference.ValueDifference<ColumnFamily>> entry : diff.entriesDiffering().entrySet())
+        diffSchema(before, after, new Differ()
         {
-            ColumnFamily pre = entry.getValue().leftValue();
-            ColumnFamily post = entry.getValue().rightValue();
-
-            if (pre.hasColumns() && post.hasColumns())
+            public void onDropped(UntypedResultSet.Row oldRow)
             {
-                MapDifference<ByteBuffer, UDAggregate> delta =
-                    Maps.difference(createAggregatesFromAggregatesPartition(new Row(entry.getKey(), pre)),
-                                    createAggregatesFromAggregatesPartition(new Row(entry.getKey(), post)));
+                Schema.instance.dropFunction(createFunctionFromFunctionRow(oldRow));
+            }
 
-                dropped.addAll(delta.entriesOnlyOnLeft().values());
-                created.addAll(delta.entriesOnlyOnRight().values());
-                Iterables.addAll(altered, Iterables.transform(delta.entriesDiffering().values(), new Function<MapDifference.ValueDifference<UDAggregate>, UDAggregate>()
+            public void onAdded(UntypedResultSet.Row newRow)
+            {
+                Schema.instance.addFunction(createFunctionFromFunctionRow(newRow));
+            }
+
+            public void onUpdated(UntypedResultSet.Row oldRow, UntypedResultSet.Row newRow)
+            {
+                Schema.instance.updateFunction(createFunctionFromFunctionRow(newRow));
+            }
+        });
+    }
+
+    private static void mergeAggregates(Map<DecoratedKey, ReadPartition> before, Map<DecoratedKey, ReadPartition> after)
+    {
+        diffSchema(before, after, new Differ()
+        {
+            public void onDropped(UntypedResultSet.Row oldRow)
+            {
+                Schema.instance.dropAggregate(createAggregateFromAggregateRow(oldRow));
+            }
+
+            public void onAdded(UntypedResultSet.Row newRow)
+            {
+                Schema.instance.addAggregate(createAggregateFromAggregateRow(newRow));
+            }
+
+            public void onUpdated(UntypedResultSet.Row oldRow, UntypedResultSet.Row newRow)
+            {
+                Schema.instance.updateAggregate(createAggregateFromAggregateRow(newRow));
+            }
+        });
+    }
+
+    public interface Differ
+    {
+        public void onDropped(UntypedResultSet.Row oldRow);
+        public void onAdded(UntypedResultSet.Row newRow);
+        public void onUpdated(UntypedResultSet.Row oldRow, UntypedResultSet.Row newRow);
+    }
+
+    private static void diffSchema(Map<DecoratedKey, ReadPartition> before, Map<DecoratedKey, ReadPartition> after, Differ differ)
+    {
+        for (ReadPartition newPartition : after.values())
+        {
+            CFMetaData metadata = newPartition.metadata();
+            DecoratedKey key = newPartition.partitionKey();
+
+            ReadPartition oldPartition = before.remove(key);
+
+            if (oldPartition == null || oldPartition.isEmpty())
+            {
+                // Means everything is to be added
+                for (Row row : newPartition)
+                    differ.onAdded(UntypedResultSet.Row.fromInternalRow(metadata, key, row));
+                continue;
+            }
+
+            Iterator<Row> oldIter = oldPartition.iterator();
+            Iterator<Row> newIter = newPartition.iterator();
+
+            Row oldRow = oldIter.hasNext() ? oldIter.next() : null;
+            Row newRow = newIter.hasNext() ? newIter.next() : null;
+            while (oldRow != null && newRow != null)
+            {
+                int cmp = metadata.comparator.compare(oldRow.clustering(), newRow.clustering());
+                if (cmp < 0)
                 {
-                    public UDAggregate apply(MapDifference.ValueDifference<UDAggregate> pair)
-                    {
-                        return pair.rightValue();
-                    }
-                }));
+                    differ.onDropped(UntypedResultSet.Row.fromInternalRow(metadata, key, oldRow));
+                    oldRow = oldIter.hasNext() ? oldIter.next() : null;
+                }
+                else if (cmp > 0)
+                {
+
+                    differ.onAdded(UntypedResultSet.Row.fromInternalRow(metadata, key, newRow));
+                    newRow = newIter.hasNext() ? newIter.next() : null;
+                }
+                else
+                {
+                    if (!oldRow.equals(newRow))
+                        differ.onUpdated(UntypedResultSet.Row.fromInternalRow(metadata, key, oldRow), UntypedResultSet.Row.fromInternalRow(metadata, key, newRow));
+
+                    oldRow = oldIter.hasNext() ? oldIter.next() : null;
+                    newRow = newIter.hasNext() ? newIter.next() : null;
+                }
             }
-            else if (pre.hasColumns())
+
+            while (oldRow != null)
             {
-                dropped.addAll(createAggregatesFromAggregatesPartition(new Row(entry.getKey(), pre)).values());
+                differ.onDropped(UntypedResultSet.Row.fromInternalRow(metadata, key, oldRow));
+                oldRow = oldIter.hasNext() ? oldIter.next() : null;
             }
-            else if (post.hasColumns())
+            while (newRow != null)
             {
-                created.addAll(createAggregatesFromAggregatesPartition(new Row(entry.getKey(), post)).values());
+                differ.onAdded(UntypedResultSet.Row.fromInternalRow(metadata, key, newRow));
+                newRow = newIter.hasNext() ? newIter.next() : null;
             }
         }
 
-        for (UDAggregate udf : created)
-            Schema.instance.addAggregate(udf);
-        for (UDAggregate udf : altered)
-            Schema.instance.updateAggregate(udf);
-        for (UDAggregate udf : dropped)
-            Schema.instance.dropAggregate(udf);
+        // What remains is those keys that were only in before.
+        for (ReadPartition partition : before.values())
+            for (Row row : partition)
+                differ.onDropped(UntypedResultSet.Row.fromInternalRow(partition.metadata(), partition.partitionKey(), row));
     }
 
     /*
@@ -696,13 +637,13 @@ public class LegacySchemaTables
 
     private static Mutation makeCreateKeyspaceMutation(KSMetaData keyspace, long timestamp, boolean withTablesAndTypesAndFunctions)
     {
-        Mutation mutation = new Mutation(SystemKeyspace.NAME, getSchemaKSKey(keyspace.name));
-        ColumnFamily cells = mutation.addOrGet(Keyspaces);
-        CFRowAdder adder = new CFRowAdder(cells, Keyspaces.comparator.builder().build(), timestamp);
+        RowUpdateBuilder adder = new RowUpdateBuilder(Keyspaces, timestamp, keyspace.name).clustering();
 
         adder.add("durable_writes", keyspace.durableWrites);
         adder.add("strategy_class", keyspace.strategyClass.getName());
         adder.add("strategy_options", json(keyspace.strategyOptions));
+
+        Mutation mutation = adder.build();
 
         if (withTablesAndTypesAndFunctions)
         {
@@ -718,28 +659,30 @@ public class LegacySchemaTables
 
     public static Mutation makeDropKeyspaceMutation(KSMetaData keyspace, long timestamp)
     {
-        Mutation mutation = new Mutation(SystemKeyspace.NAME, getSchemaKSKey(keyspace.name));
-        for (String schemaTable : ALL)
-            mutation.delete(schemaTable, timestamp);
-        mutation.delete(SystemKeyspace.BUILT_INDEXES, timestamp);
+        int nowInSec = FBUtilities.nowInSeconds();
+        Mutation mutation = new Mutation(SystemKeyspace.NAME, getSchemaKSDecoratedKey(keyspace.name));
+        for (CFMetaData schemaTable : All)
+            mutation.add(PartitionUpdate.fullPartitionDelete(schemaTable, mutation.key(), timestamp, nowInSec));
+        mutation.add(PartitionUpdate.fullPartitionDelete(SystemKeyspace.BuiltIndexes, mutation.key(), timestamp, nowInSec));
         return mutation;
     }
 
-    private static KSMetaData createKeyspaceFromSchemaPartitions(Row serializedKeyspace, Row serializedTables, Row serializedTypes)
+    private static KSMetaData createKeyspaceFromSchemaPartitions(RowIterator serializedKeyspace, RowIterator serializedTables, RowIterator serializedTypes)
     {
-        Collection<CFMetaData> tables = createTablesFromTablesPartition(serializedTables).values();
+        Collection<CFMetaData> tables = createTablesFromTablesPartition(serializedTables);
         UTMetaData types = new UTMetaData(createTypesFromPartition(serializedTypes));
         return createKeyspaceFromSchemaPartition(serializedKeyspace).cloneWith(tables, types);
     }
 
     public static KSMetaData createKeyspaceFromName(String keyspace)
     {
-        Row partition = readSchemaPartitionForKeyspace(KEYSPACES, keyspace);
+        try (RowIterator partition = readSchemaPartitionForKeyspace(KEYSPACES, keyspace))
+        {
+            if (RowIterators.isEmpty(partition))
+                throw new RuntimeException(String.format("%s not found in the schema definitions keyspaceName (%s).", keyspace, KEYSPACES));
 
-        if (isEmptySchemaPartition(partition))
-            throw new RuntimeException(String.format("%s not found in the schema definitions keyspaceName (%s).", keyspace, KEYSPACES));
-
-        return createKeyspaceFromSchemaPartition(partition);
+            return createKeyspaceFromSchemaPartition(partition);
+        }
     }
 
     /**
@@ -747,7 +690,7 @@ public class LegacySchemaTables
      *
      * @param partition Keyspace attributes in serialized form
      */
-    private static KSMetaData createKeyspaceFromSchemaPartition(Row partition)
+    private static KSMetaData createKeyspaceFromSchemaPartition(RowIterator partition)
     {
         String query = String.format("SELECT * FROM %s.%s", SystemKeyspace.NAME, KEYSPACES);
         UntypedResultSet.Row row = QueryProcessor.resultify(query, partition).one();
@@ -771,10 +714,8 @@ public class LegacySchemaTables
 
     private static void addTypeToSchemaMutation(UserType type, long timestamp, Mutation mutation)
     {
-        ColumnFamily cells = mutation.addOrGet(Usertypes);
-
-        Composite prefix = Usertypes.comparator.make(type.name);
-        CFRowAdder adder = new CFRowAdder(cells, prefix, timestamp);
+        RowUpdateBuilder adder = new RowUpdateBuilder(Usertypes, timestamp, mutation)
+                                 .clustering(type.name);
 
         adder.resetCollection("field_names");
         adder.resetCollection("field_types");
@@ -784,23 +725,18 @@ public class LegacySchemaTables
             adder.addListEntry("field_names", type.fieldName(i));
             adder.addListEntry("field_types", type.fieldType(i).toString());
         }
+
+        adder.build();
     }
 
     public static Mutation dropTypeFromSchemaMutation(KSMetaData keyspace, UserType type, long timestamp)
     {
         // Include the serialized keyspace in case the target node missed a CREATE KEYSPACE migration (see CASSANDRA-5631).
         Mutation mutation = makeCreateKeyspaceMutation(keyspace, timestamp, false);
-
-        ColumnFamily cells = mutation.addOrGet(Usertypes);
-        int ldt = (int) (System.currentTimeMillis() / 1000);
-
-        Composite prefix = Usertypes.comparator.make(type.name);
-        cells.addAtom(new RangeTombstone(prefix, prefix.end(), timestamp, ldt));
-
-        return mutation;
+        return RowUpdateBuilder.deleteRow(Usertypes, timestamp, mutation, type.name);
     }
 
-    private static Map<ByteBuffer, UserType> createTypesFromPartition(Row partition)
+    private static Map<ByteBuffer, UserType> createTypesFromPartition(RowIterator partition)
     {
         String query = String.format("SELECT * FROM %s.%s", SystemKeyspace.NAME, USERTYPES);
         Map<ByteBuffer, UserType> types = new HashMap<>();
@@ -846,9 +782,8 @@ public class LegacySchemaTables
     {
         // For property that can be null (and can be changed), we insert tombstones, to make sure
         // we don't keep a property the user has removed
-        ColumnFamily cells = mutation.addOrGet(Columnfamilies);
-        Composite prefix = Columnfamilies.comparator.make(table.cfName);
-        CFRowAdder adder = new CFRowAdder(cells, prefix, timestamp);
+        RowUpdateBuilder adder = new RowUpdateBuilder(Columnfamilies, timestamp, mutation)
+                                 .clustering(table.cfName);
 
         adder.add("cf_id", table.cfId);
         adder.add("type", table.cfType.toString());
@@ -863,7 +798,7 @@ public class LegacySchemaTables
         }
         else
         {
-            adder.add("comparator", table.comparator.toString());
+            adder.add("comparator", table.layout().makeLegacyComparator().toString());
         }
 
         adder.add("bloom_filter_fp_chance", table.getBloomFilterFpChance());
@@ -885,10 +820,16 @@ public class LegacySchemaTables
         adder.add("read_repair_chance", table.getReadRepairChance());
         adder.add("speculative_retry", table.getSpeculativeRetry().toString());
 
-        for (Map.Entry<ColumnIdentifier, Long> entry : table.getDroppedColumns().entrySet())
-            adder.addMapEntry("dropped_columns", entry.getKey().toString(), entry.getValue());
+        for (Map.Entry<ColumnIdentifier, CFMetaData.DroppedColumn> entry : table.getDroppedColumns().entrySet())
+        {
+            String name = entry.getKey().toString();
+            CFMetaData.DroppedColumn column = entry.getValue();
+            adder.addMapEntry("dropped_columns", name, column.droppedTime);
+            if (column.type != null)
+                adder.addMapEntry("dropped_columns_types", name, column.type.toString());
+        }
 
-        adder.add("is_dense", table.getIsDense());
+        adder.add("is_dense", table.layout().isDense());
 
         if (withColumnsAndTriggers)
         {
@@ -898,6 +839,8 @@ public class LegacySchemaTables
             for (TriggerDefinition trigger : table.getTriggers().values())
                 addTriggerToSchemaMutation(table, trigger, timestamp, mutation);
         }
+
+        adder.build();
     }
 
     public static Mutation makeUpdateTableMutation(KSMetaData keyspace,
@@ -950,11 +893,7 @@ public class LegacySchemaTables
         // Include the serialized keyspace in case the target node missed a CREATE KEYSPACE migration (see CASSANDRA-5631).
         Mutation mutation = makeCreateKeyspaceMutation(keyspace, timestamp, false);
 
-        ColumnFamily cells = mutation.addOrGet(Columnfamilies);
-        int ldt = (int) (System.currentTimeMillis() / 1000);
-
-        Composite prefix = Columnfamilies.comparator.make(table.cfName);
-        cells.addAtom(new RangeTombstone(prefix, prefix.end(), timestamp, ldt));
+        RowUpdateBuilder.deleteRow(Columnfamilies, timestamp, mutation, table.cfName);
 
         for (ColumnDefinition column : table.allColumns())
             dropColumnFromSchemaMutation(table, column, timestamp, mutation);
@@ -963,21 +902,21 @@ public class LegacySchemaTables
             dropTriggerFromSchemaMutation(table, trigger, timestamp, mutation);
 
         // TODO: get rid of in #6717
-        ColumnFamily indexCells = mutation.addOrGet(SystemKeyspace.BuiltIndexes);
         for (String indexName : Keyspace.open(keyspace.name).getColumnFamilyStore(table.cfName).getBuiltIndexes())
-            indexCells.addTombstone(indexCells.getComparator().makeCellName(indexName), ldt, timestamp);
+            RowUpdateBuilder.deleteRow(SystemKeyspace.BuiltIndexes, timestamp, mutation, indexName);
 
         return mutation;
     }
 
     public static CFMetaData createTableFromName(String keyspace, String table)
     {
-        Row partition = readSchemaPartitionForTable(COLUMNFAMILIES, keyspace, table);
+        try (RowIterator partition = readSchemaPartitionForTable(COLUMNFAMILIES, keyspace, table))
+        {
+            if (RowIterators.isEmpty(partition))
+                throw new RuntimeException(String.format("%s:%s not found in the schema definitions keyspace.", keyspace, table));
 
-        if (isEmptySchemaPartition(partition))
-            throw new RuntimeException(String.format("%s:%s not found in the schema definitions keyspace.", keyspace, table));
-
-        return createTableFromTablePartition(partition);
+            return createTableFromTablePartition(partition);
+        }
     }
 
     /**
@@ -985,37 +924,34 @@ public class LegacySchemaTables
      *
      * @return map containing name of the table and its metadata for faster lookup
      */
-    private static Map<String, CFMetaData> createTablesFromTablesPartition(Row partition)
+    private static Collection<CFMetaData> createTablesFromTablesPartition(RowIterator partition)
     {
-        if (partition.cf == null)
-            return Collections.emptyMap();
+        if (RowIterators.isEmpty(partition))
+            return Collections.emptyList();
 
         String query = String.format("SELECT * FROM %s.%s", SystemKeyspace.NAME, COLUMNFAMILIES);
-        Map<String, CFMetaData> tables = new HashMap<>();
+        List<CFMetaData> tables = new ArrayList<>();
         for (UntypedResultSet.Row row : QueryProcessor.resultify(query, partition))
-        {
-            CFMetaData cfm = createTableFromTableRow(row);
-            tables.put(cfm.cfName, cfm);
-        }
+            tables.add(createTableFromTableRow(row));
         return tables;
     }
 
-    public static CFMetaData createTableFromTablePartitionAndColumnsPartition(Row serializedTable, Row serializedColumns)
+    public static CFMetaData createTableFromTablePartitionAndColumnsPartition(RowIterator serializedTable, RowIterator serializedColumns)
     {
         String query = String.format("SELECT * FROM %s.%s", SystemKeyspace.NAME, COLUMNFAMILIES);
         return createTableFromTableRowAndColumnsPartition(QueryProcessor.resultify(query, serializedTable).one(), serializedColumns);
     }
 
-    private static CFMetaData createTableFromTableRowAndColumnsPartition(UntypedResultSet.Row tableRow, Row serializedColumns)
+    private static CFMetaData createTableFromTableRowAndColumnsPartition(UntypedResultSet.Row tableRow, RowIterator serializedColumns)
     {
         String query = String.format("SELECT * FROM %s.%s", SystemKeyspace.NAME, COLUMNS);
         return createTableFromTableRowAndColumnRows(tableRow, QueryProcessor.resultify(query, serializedColumns));
     }
 
-    private static CFMetaData createTableFromTablePartition(Row row)
+    private static CFMetaData createTableFromTablePartition(RowIterator partition)
     {
         String query = String.format("SELECT * FROM %s.%s", SystemKeyspace.NAME, COLUMNFAMILIES);
-        return createTableFromTableRow(QueryProcessor.resultify(query, row).one());
+        return createTableFromTableRow(QueryProcessor.resultify(query, partition).one());
     }
 
     /**
@@ -1028,14 +964,16 @@ public class LegacySchemaTables
         String ksName = result.getString("keyspace_name");
         String cfName = result.getString("columnfamily_name");
 
-        Row serializedColumns = readSchemaPartitionForTable(COLUMNS, ksName, cfName);
-        CFMetaData cfm = createTableFromTableRowAndColumnsPartition(result, serializedColumns);
+        try (RowIterator serializedColumns = readSchemaPartitionForTable(COLUMNS, ksName, cfName);
+             RowIterator serializedTriggers = readSchemaPartitionForTable(TRIGGERS, ksName, cfName))
+        {
 
-        Row serializedTriggers = readSchemaPartitionForTable(TRIGGERS, ksName, cfName);
-        for (TriggerDefinition trigger : createTriggersFromTriggersPartition(serializedTriggers))
-            cfm.addTriggerDefinition(trigger);
+            CFMetaData cfm = createTableFromTableRowAndColumnsPartition(result, serializedColumns);
+            for (TriggerDefinition trigger : createTriggersFromTriggersPartition(serializedTriggers))
+                cfm.addTriggerDefinition(trigger);
 
-        return cfm;
+            return cfm;
+        }
     }
 
     public static CFMetaData createTableFromTableRowAndColumnRows(UntypedResultSet.Row result,
@@ -1048,27 +986,20 @@ public class LegacySchemaTables
         AbstractType<?> subComparator = result.has("subcomparator") ? TypeParser.parse(result.getString("subcomparator")) : null;
         ColumnFamilyType cfType = ColumnFamilyType.valueOf(result.getString("type"));
 
-        AbstractType<?> fullRawComparator = CFMetaData.makeRawAbstractType(rawComparator, subComparator);
-
         List<ColumnDefinition> columnDefs = createColumnsFromColumnRows(serializedColumnDefinitions,
                                                                         ksName,
                                                                         cfName,
-                                                                        fullRawComparator,
+                                                                        rawComparator,
+                                                                        subComparator,
                                                                         cfType == ColumnFamilyType.Super);
-
-        boolean isDense = result.has("is_dense")
-                        ? result.getBoolean("is_dense")
-                        : CFMetaData.calculateIsDense(fullRawComparator, columnDefs);
-
-        CellNameType comparator = CellNames.fromAbstractType(fullRawComparator, isDense);
 
         // if we are upgrading, we use id generated from names initially
         UUID cfId = result.has("cf_id")
                   ? result.getUUID("cf_id")
                   : CFMetaData.generateLegacyCfId(ksName, cfName);
 
-        CFMetaData cfm = new CFMetaData(ksName, cfName, cfType, comparator, cfId);
-        cfm.isDense(isDense);
+        ClusteringComparator cc = CFMetaData.makeComparator(rawComparator, subComparator, result.getBoolean("is_dense"));
+        CFMetaData cfm = new CFMetaData(ksName, cfName, cfType, cc, cfId);
 
         cfm.readRepairChance(result.getDouble("read_repair_chance"));
         cfm.dcLocalReadRepairChance(result.getDouble("local_read_repair_chance"));
@@ -1102,7 +1033,12 @@ public class LegacySchemaTables
             cfm.bloomFilterFpChance(cfm.getBloomFilterFpChance());
 
         if (result.has("dropped_columns"))
-            cfm.droppedColumns(convertDroppedColumns(result.getMap("dropped_columns", UTF8Type.instance, LongType.instance)));
+        {
+            Map<String, String> types = result.has("dropped_columns_types")
+                                      ? result.getMap("dropped_columns_types", UTF8Type.instance, UTF8Type.instance) 
+                                      : Collections.<String, String>emptyMap();
+            addDroppedColumns(cfm, result.getMap("dropped_columns", UTF8Type.instance, LongType.instance), types);
+        }
 
         for (ColumnDefinition cd : columnDefs)
             cfm.addOrReplaceColumnDefinition(cd);
@@ -1110,12 +1046,15 @@ public class LegacySchemaTables
         return cfm.rebuild();
     }
 
-    private static Map<ColumnIdentifier, Long> convertDroppedColumns(Map<String, Long> raw)
+    private static void addDroppedColumns(CFMetaData cfm, Map<String, Long> droppedTimes, Map<String, String> types)
     {
-        Map<ColumnIdentifier, Long> converted = Maps.newHashMap();
-        for (Map.Entry<String, Long> entry : raw.entrySet())
-            converted.put(new ColumnIdentifier(entry.getKey(), true), entry.getValue());
-        return converted;
+        for (Map.Entry<String, Long> entry : droppedTimes.entrySet())
+        {
+            String name = entry.getKey();
+            long time = entry.getValue();
+            AbstractType<?> type = types.containsKey(name) ? TypeParser.parse(types.get(name)) : null;
+            cfm.getDroppedColumns().put(new ColumnIdentifier(name, true), new CFMetaData.DroppedColumn(type, time));
+        }
     }
 
     /*
@@ -1124,9 +1063,8 @@ public class LegacySchemaTables
 
     private static void addColumnToSchemaMutation(CFMetaData table, ColumnDefinition column, long timestamp, Mutation mutation)
     {
-        ColumnFamily cells = mutation.addOrGet(Columns);
-        Composite prefix = Columns.comparator.make(table.cfName, column.name.toString());
-        CFRowAdder adder = new CFRowAdder(cells, prefix, timestamp);
+        RowUpdateBuilder adder = new RowUpdateBuilder(Columns, timestamp, mutation)
+                                 .clustering(table.cfName, column.name.toString());
 
         adder.add("validator", column.type.toString());
         adder.add("type", serializeKind(column.kind));
@@ -1134,6 +1072,8 @@ public class LegacySchemaTables
         adder.add("index_name", column.getIndexName());
         adder.add("index_type", column.getIndexType() == null ? null : column.getIndexType().toString());
         adder.add("index_options", json(column.getIndexOptions()));
+
+        adder.build();
     }
 
     private static String serializeKind(ColumnDefinition.Kind kind)
@@ -1151,23 +1091,20 @@ public class LegacySchemaTables
 
     private static void dropColumnFromSchemaMutation(CFMetaData table, ColumnDefinition column, long timestamp, Mutation mutation)
     {
-        ColumnFamily cells = mutation.addOrGet(Columns);
-        int ldt = (int) (System.currentTimeMillis() / 1000);
-
         // Note: we do want to use name.toString(), not name.bytes directly for backward compatibility (For CQL3, this won't make a difference).
-        Composite prefix = Columns.comparator.make(table.cfName, column.name.toString());
-        cells.addAtom(new RangeTombstone(prefix, prefix.end(), timestamp, ldt));
+        RowUpdateBuilder.deleteRow(Columns, timestamp, mutation, table.cfName, column.name.toString());
     }
 
     private static List<ColumnDefinition> createColumnsFromColumnRows(UntypedResultSet rows,
                                                                       String keyspace,
                                                                       String table,
                                                                       AbstractType<?> rawComparator,
+                                                                      AbstractType<?> rawSubComparator,
                                                                       boolean isSuper)
     {
         List<ColumnDefinition> columns = new ArrayList<>();
         for (UntypedResultSet.Row row : rows)
-            columns.add(createColumnFromColumnRow(row, keyspace, table, rawComparator, isSuper));
+            columns.add(createColumnFromColumnRow(row, keyspace, table, rawComparator, rawSubComparator, isSuper));
         return columns;
     }
 
@@ -1175,6 +1112,7 @@ public class LegacySchemaTables
                                                               String keyspace,
                                                               String table,
                                                               AbstractType<?> rawComparator,
+                                                              AbstractType<?> rawSubComparator,
                                                               boolean isSuper)
     {
         ColumnDefinition.Kind kind = deserializeKind(row.getString("type"));
@@ -1187,9 +1125,9 @@ public class LegacySchemaTables
 
         // Note: we save the column name as string, but we should not assume that it is an UTF8 name, we
         // we need to use the comparator fromString method
-        AbstractType<?> comparator = kind == ColumnDefinition.Kind.REGULAR
-                                   ? getComponentComparator(rawComparator, componentIndex)
-                                   : UTF8Type.instance;
+        AbstractType<?> comparator = isSuper ? rawSubComparator : (kind == ColumnDefinition.Kind.REGULAR
+                                                                   ? getComponentComparator(rawComparator, componentIndex)
+                                                                   : UTF8Type.instance);
         ColumnIdentifier name = new ColumnIdentifier(comparator.fromString(row.getString("column_name")), comparator);
 
         AbstractType<?> validator = parseType(row.getString("validator"));
@@ -1222,19 +1160,15 @@ public class LegacySchemaTables
 
     private static void addTriggerToSchemaMutation(CFMetaData table, TriggerDefinition trigger, long timestamp, Mutation mutation)
     {
-        ColumnFamily cells = mutation.addOrGet(Triggers);
-        Composite prefix = Triggers.comparator.make(table.cfName, trigger.name);
-        CFRowAdder adder = new CFRowAdder(cells, prefix, timestamp);
-        adder.addMapEntry("trigger_options", "class", trigger.classOption);
+        new RowUpdateBuilder(Triggers, timestamp, mutation)
+            .clustering(table.cfName, trigger.name)
+            .addMapEntry("trigger_options", "class", trigger.classOption)
+            .build();
     }
 
     private static void dropTriggerFromSchemaMutation(CFMetaData table, TriggerDefinition trigger, long timestamp, Mutation mutation)
     {
-        ColumnFamily cells = mutation.addOrGet(Triggers);
-        int ldt = (int) (System.currentTimeMillis() / 1000);
-
-        Composite prefix = Triggers.comparator.make(table.cfName, trigger.name);
-        cells.addAtom(new RangeTombstone(prefix, prefix.end(), timestamp, ldt));
+        RowUpdateBuilder.deleteRow(Triggers, timestamp, mutation, table.cfName, trigger.name);
     }
 
     /**
@@ -1243,7 +1177,7 @@ public class LegacySchemaTables
      * @param partition storage-level partition containing the trigger definitions
      * @return the list of processed TriggerDefinitions
      */
-    private static List<TriggerDefinition> createTriggersFromTriggersPartition(Row partition)
+    private static List<TriggerDefinition> createTriggersFromTriggersPartition(RowIterator partition)
     {
         List<TriggerDefinition> triggers = new ArrayList<>();
         String query = String.format("SELECT * FROM %s.%s", SystemKeyspace.NAME, TRIGGERS);
@@ -1270,48 +1204,37 @@ public class LegacySchemaTables
 
     private static void addFunctionToSchemaMutation(UDFunction function, long timestamp, Mutation mutation)
     {
-        ColumnFamily cells = mutation.addOrGet(Functions);
-        Composite prefix = Functions.comparator.make(function.name().name, functionSignatureWithTypes(function));
-        CFRowAdder adder = new CFRowAdder(cells, prefix, timestamp);
-
-        adder.resetCollection("argument_names");
-        adder.resetCollection("argument_types");
-
-        for (int i = 0; i < function.argNames().size(); i++)
-        {
-            adder.addListEntry("argument_names", function.argNames().get(i).bytes);
-            adder.addListEntry("argument_types", function.argTypes().get(i).toString());
-        }
+        RowUpdateBuilder adder = new RowUpdateBuilder(Functions, timestamp, mutation)
+                                 .clustering(function.name().name, functionSignatureWithTypes(function));
 
         adder.add("body", function.body());
         adder.add("is_deterministic", function.isDeterministic());
         adder.add("language", function.language());
         adder.add("return_type", function.returnType().toString());
+
+        adder.resetCollection("argument_names");
+        adder.resetCollection("argument_types");
+        for (int i = 0; i < function.argNames().size(); i++)
+        {
+            adder.addListEntry("argument_names", function.argNames().get(i).bytes);
+            adder.addListEntry("argument_types", function.argTypes().get(i).toString());
+        }
+        adder.build();
     }
 
     public static Mutation makeDropFunctionMutation(KSMetaData keyspace, UDFunction function, long timestamp)
     {
         // Include the serialized keyspace in case the target node missed a CREATE KEYSPACE migration (see CASSANDRA-5631).
         Mutation mutation = makeCreateKeyspaceMutation(keyspace, timestamp, false);
-
-        ColumnFamily cells = mutation.addOrGet(Functions);
-        int ldt = (int) (System.currentTimeMillis() / 1000);
-
-        Composite prefix = Functions.comparator.make(function.name().name, functionSignatureWithTypes(function));
-        cells.addAtom(new RangeTombstone(prefix, prefix.end(), timestamp, ldt));
-
-        return mutation;
+        return RowUpdateBuilder.deleteRow(Functions, timestamp, mutation, function.name().name, functionSignatureWithTypes(function));
     }
 
-    private static Map<ByteBuffer, UDFunction> createFunctionsFromFunctionsPartition(Row partition)
+    private static Collection<UDFunction> createFunctionsFromFunctionsPartition(RowIterator partition)
     {
-        Map<ByteBuffer, UDFunction> functions = new HashMap<>();
+        List<UDFunction> functions = new ArrayList<>();
         String query = String.format("SELECT * FROM %s.%s", SystemKeyspace.NAME, FUNCTIONS);
         for (UntypedResultSet.Row row : QueryProcessor.resultify(query, partition))
-        {
-            UDFunction function = createFunctionFromFunctionRow(row);
-            functions.put(functionSignatureWithNameAndTypes(function), function);
-        }
+            functions.add(createFunctionFromFunctionRow(row));
         return functions;
     }
 
@@ -1362,9 +1285,8 @@ public class LegacySchemaTables
 
     private static void addAggregateToSchemaMutation(UDAggregate aggregate, long timestamp, Mutation mutation)
     {
-        ColumnFamily cells = mutation.addOrGet(Aggregates);
-        Composite prefix = Aggregates.comparator.make(aggregate.name().name, functionSignatureWithTypes(aggregate));
-        CFRowAdder adder = new CFRowAdder(cells, prefix, timestamp);
+        RowUpdateBuilder adder = new RowUpdateBuilder(Aggregates, timestamp, mutation)
+                                 .clustering(aggregate.name().name, functionSignatureWithTypes(aggregate));
 
         adder.resetCollection("argument_types");
         adder.add("return_type", aggregate.returnType().toString());
@@ -1378,17 +1300,16 @@ public class LegacySchemaTables
 
         for (AbstractType<?> argType : aggregate.argTypes())
             adder.addListEntry("argument_types", argType.toString());
+
+        adder.build();
     }
 
-    private static Map<ByteBuffer, UDAggregate> createAggregatesFromAggregatesPartition(Row partition)
+    private static Collection<UDAggregate> createAggregatesFromAggregatesPartition(RowIterator partition)
     {
-        Map<ByteBuffer, UDAggregate> aggregates = new HashMap<>();
+        List<UDAggregate> aggregates = new ArrayList<>();
         String query = String.format("SELECT * FROM %s.%s", SystemKeyspace.NAME, AGGREGATES);
         for (UntypedResultSet.Row row : QueryProcessor.resultify(query, partition))
-        {
-            UDAggregate aggregate = createAggregateFromAggregateRow(row);
-            aggregates.put(functionSignatureWithNameAndTypes(aggregate), aggregate);
-        }
+            aggregates.add(createAggregateFromAggregateRow(row));
         return aggregates;
     }
 
@@ -1433,14 +1354,7 @@ public class LegacySchemaTables
     {
         // Include the serialized keyspace in case the target node missed a CREATE KEYSPACE migration (see CASSANDRA-5631).
         Mutation mutation = makeCreateKeyspaceMutation(keyspace, timestamp, false);
-
-        ColumnFamily cells = mutation.addOrGet(Aggregates);
-        int ldt = (int) (System.currentTimeMillis() / 1000);
-
-        Composite prefix = Aggregates.comparator.make(aggregate.name().name, functionSignatureWithTypes(aggregate));
-        cells.addAtom(new RangeTombstone(prefix, prefix.end(), timestamp, ldt));
-
-        return mutation;
+        return RowUpdateBuilder.deleteRow(Aggregates, timestamp, mutation, aggregate.name().name, functionSignatureWithTypes(aggregate));
     }
 
     private static AbstractType<?> parseType(String str)
@@ -1473,5 +1387,4 @@ public class LegacySchemaTables
             strList.add(argType.asCQL3Type().toString());
         return list.decompose(strList);
     }
-
 }

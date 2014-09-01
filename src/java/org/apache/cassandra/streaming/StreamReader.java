@@ -21,28 +21,33 @@ import java.io.*;
 import java.nio.channels.Channels;
 import java.nio.channels.ReadableByteChannel;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.UUID;
 
 import com.google.common.base.Throwables;
-import org.apache.cassandra.io.sstable.format.SSTableFormat;
-import org.apache.cassandra.io.sstable.format.SSTableWriter;
-import org.apache.cassandra.io.sstable.format.Version;
 
+import com.google.common.collect.UnmodifiableIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.ning.compress.lzf.LZFInputStream;
 
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.Schema;
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.Directories;
-import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.atoms.*;
+import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
+import org.apache.cassandra.io.sstable.SSTableAtomIterator;
+import org.apache.cassandra.io.sstable.format.SSTableFormat;
+import org.apache.cassandra.io.sstable.format.SSTableWriter;
+import org.apache.cassandra.io.sstable.format.Version;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.streaming.messages.FileMessageHeader;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.BytesReadTracker;
+import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 
 
@@ -60,6 +65,7 @@ public class StreamReader
     protected final long repairedAt;
     protected final SSTableFormat.Type format;
     protected final int sstableLevel;
+    protected final SerializationHeader.Component header;
 
     protected Descriptor desc;
 
@@ -69,10 +75,11 @@ public class StreamReader
         this.cfId = header.cfId;
         this.estimatedKeys = header.estimatedKeys;
         this.sections = header.sections;
-        this.inputVersion = header.format.info.getVersion(header.version);
+        this.inputVersion = header.version;
         this.repairedAt = header.repairedAt;
         this.format = header.format;
         this.sstableLevel = header.sstableLevel;
+        this.header = header.header;
     }
 
     /**
@@ -97,17 +104,18 @@ public class StreamReader
 
         DataInputStream dis = new DataInputStream(new LZFInputStream(Channels.newInputStream(channel)));
         BytesReadTracker in = new BytesReadTracker(dis);
+        StreamDeserializer deserializer = new StreamDeserializer(cfs.metadata, in, inputVersion, header.toHeader(cfs.metadata));
         try
         {
             while (in.getBytesRead() < totalSize)
             {
-                writeRow(writer, in, cfs);
-
+                writePartition(deserializer, writer, cfs);
                 // TODO move this to BytesReadTracker
                 session.progress(desc, ProgressInfo.Direction.IN, in.getBytesRead(), totalSize);
             }
             return writer;
-        } catch (Throwable e)
+        }
+        catch (Throwable e)
         {
             writer.abort();
             drain(dis, in.getBytesRead());
@@ -125,7 +133,7 @@ public class StreamReader
             throw new IOException("Insufficient disk space to store " + totalSize + " bytes");
         desc = Descriptor.fromFilename(cfs.getTempSSTablePath(cfs.directories.getLocationForDisk(localDir), format));
 
-        return SSTableWriter.create(desc, estimatedKeys, repairedAt, sstableLevel);
+        return SSTableWriter.create(desc, estimatedKeys, repairedAt, sstableLevel, header.toHeader(cfs.metadata));
     }
 
     protected void drain(InputStream dis, long bytesRead) throws IOException
@@ -155,10 +163,144 @@ public class StreamReader
         return size;
     }
 
-    protected void writeRow(SSTableWriter writer, DataInput in, ColumnFamilyStore cfs) throws IOException
+    protected void writePartition(StreamDeserializer deserializer, SSTableWriter writer, ColumnFamilyStore cfs) throws IOException
     {
-        DecoratedKey key = StorageService.getPartitioner().decorateKey(ByteBufferUtil.readWithShortLength(in));
-        writer.appendFromStream(key, cfs.metadata, in, inputVersion);
-        cfs.invalidateCachedRow(key);
+        DecoratedKey key = deserializer.newPartition();
+        writer.append(deserializer);
+        deserializer.checkForExceptions();
+        cfs.invalidateCachedPartition(key);
+    }
+
+    public static class StreamDeserializer extends UnmodifiableIterator<Atom> implements AtomIterator
+    {
+        private final CFMetaData metadata;
+        private final DataInput in;
+        private final SerializationHeader header;
+        private final SerializationHelper helper;
+
+        private DecoratedKey key;
+        private DeletionTime partitionLevelDeletion;
+        private Iterator<Atom> atomIter;
+        private Row staticRow;
+        private IOException exception;
+
+        public StreamDeserializer(CFMetaData metadata, DataInput in, Version version, SerializationHeader header)
+        {
+            this.metadata = metadata;
+            this.in = in;
+            this.helper = new SerializationHelper(version.correspondingMessagingVersion(), LegacyLayout.Flag.PRESERVE_SIZE, FBUtilities.nowInSeconds());
+            this.header = header;
+        }
+
+        public DecoratedKey newPartition() throws IOException
+        {
+            key = StorageService.getPartitioner().decorateKey(ByteBufferUtil.readWithShortLength(in));
+            partitionLevelDeletion = DeletionTime.serializer.deserialize(in);
+            staticRow = header.hasStatic()
+                      ? AtomSerializer.serializer.deserializeStaticRow(in, header, helper)
+                      : Rows.EMPTY_STATIC_ROW;
+            atomIter = new SSTableAtomIterator(in, header, helper)
+            {
+                @Override
+                protected Row updateRow(ReusableRow row)
+                {
+                    return metadata.isCounter()
+                         ? row.markCounterLocalShardsToBeCleared()
+                         : row;
+                }
+
+                protected RuntimeException onIOException(IOException e)
+                {
+                    // We'll catch that in hasNext() below
+                    throw new RuntimeException(e);
+                }
+            };
+            return key;
+        }
+
+        public CFMetaData metadata()
+        {
+            return metadata;
+        }
+
+        public PartitionColumns columns()
+        {
+            // We don't know which columns we'll get so assume it can be all of them
+            return metadata.partitionColumns();
+        }
+
+        public boolean isReverseOrder()
+        {
+            return false;
+        }
+
+        public DecoratedKey partitionKey()
+        {
+            return key;
+        }
+
+        public DeletionTime partitionLevelDeletion()
+        {
+            return partitionLevelDeletion;
+        }
+
+        public Row staticRow()
+        {
+            return staticRow;
+        }
+
+        public AtomStats stats()
+        {
+            return header.stats();
+        }
+
+        public int nowInSec()
+        {
+            return helper.nowInSec;
+        }
+
+        public boolean hasNext()
+        {
+            try
+            {
+                return atomIter.hasNext();
+            }
+            catch (RuntimeException e)
+            {
+                if (e.getCause() != null && e.getCause() instanceof IOException)
+                {
+                    exception = (IOException)e.getCause();
+                    return false;
+                }
+                throw e;
+            }
+        }
+
+        public Atom next()
+        {
+            // Note that in practice we know that IOException will be thrown by hasNext(), because that's
+            // where the actual reading happens, so we don't bother catching RuntimeException here (contrarily
+            // to what we do in hasNext)
+            Atom atom = atomIter.next();
+            return metadata.isCounter() && atom.kind() == Atom.Kind.ROW
+                ? maybeMarkLocalToBeCleared((Row)atom)
+                : atom;
+        }
+
+        private static Row maybeMarkLocalToBeCleared(Row row)
+        {
+            // TODO
+            throw new UnsupportedOperationException();
+        }
+
+        public void checkForExceptions() throws IOException
+        {
+            if (exception != null)
+                throw exception;
+        }
+
+        public void close()
+        {
+        }
     }
 }

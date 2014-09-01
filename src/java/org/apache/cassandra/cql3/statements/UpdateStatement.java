@@ -24,8 +24,9 @@ import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.composites.Composite;
+import org.apache.cassandra.db.atoms.*;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
+import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Pair;
@@ -50,94 +51,45 @@ public class UpdateStatement extends ModificationStatement
         return true;
     }
 
-    public void addUpdateForKey(ColumnFamily cf,
-                                ByteBuffer key,
-                                Composite prefix,
-                                UpdateParameters params) throws InvalidRequestException
+    public void addUpdateForKey(PartitionUpdate update, CBuilder cbuilder, UpdateParameters params)
+    throws InvalidRequestException
     {
-        addUpdateForKey(cf, key, prefix, params, true);
-    }
-
-    public void addUpdateForKey(ColumnFamily cf,
-                                ByteBuffer key,
-                                Composite prefix,
-                                UpdateParameters params,
-                                boolean validateIndexedColumns) throws InvalidRequestException
-    {
-        // Inserting the CQL row marker (see #4361)
-        // We always need to insert a marker for INSERT, because of the following situation:
-        //   CREATE TABLE t ( k int PRIMARY KEY, c text );
-        //   INSERT INTO t(k, c) VALUES (1, 1)
-        //   DELETE c FROM t WHERE k = 1;
-        //   SELECT * FROM t;
-        // The last query should return one row (but with c == null). Adding the marker with the insert make sure
-        // the semantic is correct (while making sure a 'DELETE FROM t WHERE k = 1' does remove the row entirely)
-        //
-        // We do not insert the marker for UPDATE however, as this amount to updating the columns in the WHERE
-        // clause which is inintuitive (#6782)
-        //
-        // We never insert markers for Super CF as this would confuse the thrift side.
-        if (type == StatementType.INSERT && cfm.isCQL3Table() && !prefix.isStatic())
-            cf.addColumn(params.makeColumn(cfm.comparator.rowMarker(prefix), ByteBufferUtil.EMPTY_BYTE_BUFFER));
-
-        List<Operation> updates = getOperations();
-
-        if (cfm.comparator.isDense())
+        if (updatesRegularRows())
         {
-            if (prefix.isEmpty())
-                throw new InvalidRequestException(String.format("Missing PRIMARY KEY part %s", cfm.clusteringColumns().get(0)));
+            Clustering clustering = cbuilder.build();
+            Row.Writer writer = update.writer();
+            params.writeClustering(clustering, writer);
 
-            // An empty name for the compact value is what we use to recognize the case where there is not column
-            // outside the PK, see CreateStatement.
-            if (!cfm.compactValueColumn().name.bytes.hasRemaining())
-            {
-                // There is no column outside the PK. So no operation could have passed through validation
-                assert updates.isEmpty();
-                new Constants.Setter(cfm.compactValueColumn(), EMPTY).execute(key, cf, prefix, params);
-            }
-            else
-            {
-                // dense means we don't have a row marker, so don't accept to set only the PK. See CASSANDRA-5648.
-                if (updates.isEmpty())
-                    throw new InvalidRequestException(String.format("Column %s is mandatory for this COMPACT STORAGE table", cfm.compactValueColumn().name));
 
-                for (Operation update : updates)
-                    update.execute(key, cf, prefix, params);
-            }
-        }
-        else
-        {
-            for (Operation update : updates)
-                update.execute(key, cf, prefix, params);
+            // We update the row timestamp (ex-row marker) only on INSERT (#6782)
+            // Further, COMPACT tables semantic differs from "CQL3" ones in that a row exists only if it has
+            // a non-null column, so we don't want to set the row timestamp for them. One exception however is
+            // the case of a COMPACT TABLE with only a PK: we allow that because we can translate it to a thrift
+            // table with a single cell having an empty value. In that case, since we don't have any column, we
+            // do want to set the row timestamp.
+            if (type == StatementType.INSERT && (cfm.isCQL3Table() || cfm.partitionColumns().isEmpty()))
+                params.writePartitionKeyLivenessInfo(writer);
+
+            List<Operation> updates = getRegularOperations();
+
+            // For a dense layout, when we translate it to thrift, we don't have a row marker. So we don't accept an insert/update
+            // that only sets the PK unless the is no declared non-PK columns (which means that the table definition only includes
+            // the PK in the first place)
+            if (updates.isEmpty() && cfm.layout().isDense() && !cfm.partitionColumns().isEmpty())
+                throw new InvalidRequestException(String.format("Column %s is mandatory for this COMPACT STORAGE table", cfm.compactValueColumn().name));
+
+            for (Operation op : updates)
+                op.execute(update.partitionKey(), clustering, writer, params);
+
+            writer.endOfRow();
         }
 
-        // validateIndexedColumns trigger a call to Keyspace.open() which we want to be able to avoid in some case
-        //(e.g. when using CQLSSTableWriter)
-        if (validateIndexedColumns)
-            validateIndexedColumns(cf);
-    }
-
-    /**
-     * Checks if the values of the indexed columns are valid.
-     *
-     * @param cf the column family
-     * @throws InvalidRequestException if one of the values of the indexed columns is not valid
-     */
-    private void validateIndexedColumns(ColumnFamily cf)
-    {
-        SecondaryIndexManager indexManager = Keyspace.open(cfm.ksName).getColumnFamilyStore(cfm.cfId).indexManager;
-        if (indexManager.hasIndexes())
+        if (updatesStaticRow())
         {
-            for (Cell cell : cf)
-            {
-                // Indexed values must be validated by any applicable index. See CASSANDRA-3057/4240/8081 for more details
-                if (!indexManager.validate(cell))
-                    throw invalidRequest("Can't index column value of size %d for index %s on %s.%s",
-                                         cell.value().remaining(),
-                                         cfm.getColumnDefinition(cell.name()).getIndexName(),
-                                         cfm.ksName,
-                                         cfm.cfName);
-            }
+            Row.Writer writer = update.staticWriter();
+            for (Operation op : getStaticOperations())
+                op.execute(update.partitionKey(), Clustering.STATIC_CLUSTERING, writer, params);
+            writer.endOfRow();
         }
     }
 

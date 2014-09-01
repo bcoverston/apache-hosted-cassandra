@@ -53,12 +53,12 @@ public class SSTableMetadataTrackingTest extends CQLTester
         StatsMetadata metadata = cfs.getSSTables().iterator().next().getSSTableMetadata();
         assertEquals(9999, metadata.minTimestamp);
         assertEquals(10000, metadata.maxTimestamp);
-        assertEquals(Integer.MAX_VALUE, metadata.maxLocalDeletionTime, 5);
+        assertEquals(System.currentTimeMillis()/1000, metadata.maxLocalDeletionTime, 5);
         cfs.forceMajorCompaction();
         metadata = cfs.getSSTables().iterator().next().getSSTableMetadata();
         assertEquals(9999, metadata.minTimestamp);
         assertEquals(10000, metadata.maxTimestamp);
-        assertEquals(Integer.MAX_VALUE, metadata.maxLocalDeletionTime, 5);
+        assertEquals(System.currentTimeMillis()/1000, metadata.maxLocalDeletionTime, 5);
     }
 
     @Test
@@ -72,12 +72,12 @@ public class SSTableMetadataTrackingTest extends CQLTester
         StatsMetadata metadata = cfs.getSSTables().iterator().next().getSSTableMetadata();
         assertEquals(9999, metadata.minTimestamp);
         assertEquals(10000, metadata.maxTimestamp);
-        assertEquals(Integer.MAX_VALUE, metadata.maxLocalDeletionTime, 5);
+        assertEquals(System.currentTimeMillis()/1000, metadata.maxLocalDeletionTime, 5);
         cfs.forceMajorCompaction();
         metadata = cfs.getSSTables().iterator().next().getSSTableMetadata();
         assertEquals(9999, metadata.minTimestamp);
         assertEquals(10000, metadata.maxTimestamp);
-        assertEquals(Integer.MAX_VALUE, metadata.maxLocalDeletionTime, 5);
+        assertEquals(System.currentTimeMillis()/1000, metadata.maxLocalDeletionTime, 5);
     }
 
 
@@ -139,6 +139,7 @@ public class SSTableMetadataTrackingTest extends CQLTester
         assertEquals(metadata.minTimestamp, metadata2.minTimestamp);
         assertEquals(metadata.maxTimestamp, metadata2.maxTimestamp);
     }
+
     @Test
     public void testTrackMetadata_rowMarkerDelete() throws Throwable
     {

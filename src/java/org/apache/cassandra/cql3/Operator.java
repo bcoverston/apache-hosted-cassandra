@@ -20,6 +20,9 @@ package org.apache.cassandra.cql3;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+
+import org.apache.cassandra.db.marshal.AbstractType;
 
 public enum Operator
 {
@@ -150,6 +153,39 @@ public enum Operator
                   return operator;
 
           throw new IOException(String.format("Cannot resolve Relation.Type from binary representation: %s", b));
+    }
+
+    /**
+     * Whether 2 values satisfy this operator (given the type they should be compared with).
+     *
+     * @throws AssertionError for IN, CONTAINS and CONTAINS_KEY as this doesn't make sense for this function.
+     */
+    public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
+    {
+        int comparison = type.compareForCQL(leftOperand, rightOperand);
+        switch (this)
+        {
+            case EQ:
+                return comparison == 0;
+            case LT:
+                return comparison < 0;
+            case LTE:
+                return comparison <= 0;
+            case GT:
+                return comparison > 0;
+            case GTE:
+                return comparison >= 0;
+            case NEQ:
+                return comparison != 0;
+            default:
+                // we shouldn't get IN, CONTAINS, or CONTAINS KEY here
+                throw new AssertionError();
+        }
+    }
+
+    public int serializedSize()
+    {
+        return 4;
     }
 
     @Override

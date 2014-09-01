@@ -185,6 +185,18 @@ public class CompositeType extends AbstractCompositeType
         return i == l.length ? l : Arrays.copyOfRange(l, 0, i);
     }
 
+    public static List<ByteBuffer> splitName(ByteBuffer name)
+    {
+        List<ByteBuffer> l = new ArrayList<>();
+        ByteBuffer bb = name.duplicate();
+        while (bb.remaining() > 0)
+        {
+            l.add(ByteBufferUtil.readBytesWithShortLength(bb));
+            bb.get(); // skip end-of-component
+        }
+        return l;
+    }
+
     // Extract component idx from bb. Return null if there is not enough component.
     public static ByteBuffer extractComponent(ByteBuffer bb, int idx)
     {

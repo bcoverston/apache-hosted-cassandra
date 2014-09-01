@@ -372,6 +372,16 @@ public class Range<T extends RingPosition<T>> extends AbstractBounds<T> implemen
         return "]";
     }
 
+    public boolean isStartInclusive()
+    {
+        return false;
+    }
+
+    public boolean isEndInclusive()
+    {
+        return true;
+    }
+
     public List<String> asList()
     {
         ArrayList<String> ret = new ArrayList<String>(2);

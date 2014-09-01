@@ -172,7 +172,7 @@ public final class SingleColumnRelation extends Relation
     {
         ColumnDefinition columnDef = toColumnDefinition(cfm, entity);
         Term term = toTerm(toReceivers(columnDef), value, cfm.ksName, boundNames);
-        return new SingleColumnRestriction.Slice(columnDef, bound, inclusive, term);
+        return new SingleColumnRestriction.SliceRestriction(columnDef, bound, inclusive, term);
     }
 
     @Override

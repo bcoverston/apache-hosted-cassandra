@@ -23,7 +23,7 @@ import java.util.*;
 import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.config.*;
 import org.apache.cassandra.cql3.*;
-import org.apache.cassandra.db.composites.CellNames;
+import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.service.ClientState;
@@ -161,14 +161,16 @@ public abstract class AlterTypeStatement extends SchemaAlteringStatement
                 cfm.keyValidator(updateWith(cfm.getKeyValidator(), keyspace, toReplace, updated));
                 break;
             case CLUSTERING_COLUMN:
-                cfm.comparator = CellNames.fromAbstractType(updateWith(cfm.comparator.asAbstractType(), keyspace, toReplace, updated), cfm.comparator.isDense());
+                cfm.comparator = updateWith(cfm.comparator, keyspace, toReplace, updated);
                 break;
-            default:
-                // If it's a collection, we still want to modify the comparator because the collection is aliased in it
-                if (def.type instanceof CollectionType)
-                    cfm.comparator = CellNames.fromAbstractType(updateWith(cfm.comparator.asAbstractType(), keyspace, toReplace, updated), cfm.comparator.isDense());
         }
         return true;
+    }
+
+    private static ClusteringComparator updateWith(ClusteringComparator comparator, String keyspace, ByteBuffer toReplace, UserType updated)
+    {
+        List<AbstractType<?>> updatedTypes = updateTypes(comparator.subtypes(), keyspace, toReplace, updated);
+        return updatedTypes == null ? comparator : new ClusteringComparator(updatedTypes, comparator.isDense, comparator.isCompound);
     }
 
     // Update the provided type were all instance of a given userType is replaced by a new version
@@ -192,23 +194,6 @@ public abstract class AlterTypeStatement extends SchemaAlteringStatement
             CompositeType ct = (CompositeType)type;
             List<AbstractType<?>> updatedTypes = updateTypes(ct.types, keyspace, toReplace, updated);
             return updatedTypes == null ? null : CompositeType.getInstance(updatedTypes);
-        }
-        else if (type instanceof ColumnToCollectionType)
-        {
-            ColumnToCollectionType ctct = (ColumnToCollectionType)type;
-            Map<ByteBuffer, CollectionType> updatedTypes = null;
-            for (Map.Entry<ByteBuffer, CollectionType> entry : ctct.defined.entrySet())
-            {
-                AbstractType<?> t = updateWith(entry.getValue(), keyspace, toReplace, updated);
-                if (t == null)
-                    continue;
-
-                if (updatedTypes == null)
-                    updatedTypes = new HashMap<>(ctct.defined);
-
-                updatedTypes.put(entry.getKey(), (CollectionType)t);
-            }
-            return updatedTypes == null ? null : ColumnToCollectionType.getInstance(updatedTypes);
         }
         else if (type instanceof CollectionType)
         {

@@ -20,13 +20,10 @@ package org.apache.cassandra.io.sstable.format.big;
 import com.google.common.util.concurrent.RateLimiter;
 import org.apache.cassandra.cache.KeyCacheKey;
 import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.db.DataRange;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.RowIndexEntry;
-import org.apache.cassandra.db.RowPosition;
-import org.apache.cassandra.db.columniterator.OnDiskAtomIterator;
-import org.apache.cassandra.db.composites.CellName;
-import org.apache.cassandra.db.filter.ColumnSlice;
+import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.atoms.SliceableAtomIterator;
+import org.apache.cassandra.db.columniterator.SSTableIterator;
+import org.apache.cassandra.db.columniterator.SSTableReversedIterator;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
@@ -55,40 +52,44 @@ public class BigTableReader extends SSTableReader
 {
     private static final Logger logger = LoggerFactory.getLogger(BigTableReader.class);
 
-    BigTableReader(Descriptor desc, Set<Component> components, CFMetaData metadata, IPartitioner partitioner, Long maxDataAge, StatsMetadata sstableMetadata, OpenReason openReason)
+    BigTableReader(Descriptor desc, Set<Component> components, CFMetaData metadata, IPartitioner partitioner, Long maxDataAge, StatsMetadata sstableMetadata, OpenReason openReason, SerializationHeader header)
     {
-        super(desc, components, metadata, partitioner, maxDataAge, sstableMetadata, openReason);
+        super(desc, components, metadata, partitioner, maxDataAge, sstableMetadata, openReason, header);
     }
 
-    public OnDiskAtomIterator iterator(DecoratedKey key, SortedSet<CellName> columns)
+    public SliceableAtomIterator iterator(DecoratedKey key, PartitionColumns selectedColumns, boolean reversed, int nowInSec)
     {
-        return new SSTableNamesIterator(this, key, columns);
+        return reversed
+             ? new SSTableReversedIterator(this, key, selectedColumns, nowInSec)
+             : new SSTableIterator(this, key, selectedColumns, nowInSec);
     }
 
-    public OnDiskAtomIterator iterator(FileDataInput input, DecoratedKey key, SortedSet<CellName> columns, RowIndexEntry indexEntry )
+    public SliceableAtomIterator iterator(FileDataInput file, DecoratedKey key, RowIndexEntry indexEntry, PartitionColumns selectedColumns, boolean reversed, int nowInSec)
     {
-        return new SSTableNamesIterator(this, input, key, columns, indexEntry);
+        return reversed
+             ? new SSTableReversedIterator(this, file, key, indexEntry, selectedColumns, nowInSec)
+             : new SSTableIterator(this, file, key, indexEntry, selectedColumns, nowInSec);
     }
 
-    public OnDiskAtomIterator iterator(DecoratedKey key, ColumnSlice[] slices, boolean reverse)
-    {
-        return new SSTableSliceIterator(this, key, slices, reverse);
-    }
-
-    public OnDiskAtomIterator iterator(FileDataInput input, DecoratedKey key, ColumnSlice[] slices, boolean reverse, RowIndexEntry indexEntry)
-    {
-        return new SSTableSliceIterator(this, input, key, slices, reverse, indexEntry);
-    }
     /**
      *
      * @param dataRange filter to use when reading the columns
      * @return A Scanner for seeking over the rows of the SSTable.
      */
-    public ISSTableScanner getScanner(DataRange dataRange, RateLimiter limiter)
+    public ISSTableScanner getScanner(DataRange dataRange, RateLimiter limiter, int nowInSec)
     {
-        return BigTableScanner.getScanner(this, dataRange, limiter);
+        return BigTableScanner.getScanner(this, dataRange, limiter, nowInSec);
     }
 
+    /**
+     * Direct I/O SSTableScanner over the full sstable.
+     *
+     * @return A Scanner for reading the full SSTable.
+     */
+    public ISSTableScanner getScanner(RateLimiter limiter, int nowInSec)
+    {
+        return BigTableScanner.getScanner(this, limiter, nowInSec);
+    }
 
     /**
      * Direct I/O SSTableScanner over a defined collection of ranges of tokens.
@@ -96,9 +97,9 @@ public class BigTableReader extends SSTableReader
      * @param ranges the range of keys to cover
      * @return A Scanner for seeking over the rows of the SSTable.
      */
-    public ISSTableScanner getScanner(Collection<Range<Token>> ranges, RateLimiter limiter)
+    public ISSTableScanner getScanner(Collection<Range<Token>> ranges, RateLimiter limiter, int nowInSec)
     {
-        return BigTableScanner.getScanner(this, ranges, limiter);
+        return BigTableScanner.getScanner(this, ranges, limiter, nowInSec);
     }
 
 
@@ -211,7 +212,7 @@ public class BigTableReader extends SSTableReader
                     if (opSatisfied)
                     {
                         // read data position from index entry
-                        RowIndexEntry indexEntry = rowIndexEntrySerializer.deserialize(in, descriptor.version);
+                        RowIndexEntry indexEntry = rowIndexEntrySerializer.deserialize(in);
                         if (exactMatch && updateCacheAndStats)
                         {
                             assert key instanceof DecoratedKey; // key can be == to the index key only if it's a true row key

@@ -26,11 +26,8 @@ import org.apache.commons.lang3.StringUtils;
 
 import org.apache.cassandra.auth.*;
 import org.apache.cassandra.config.*;
-import org.apache.cassandra.cql3.CFName;
-import org.apache.cassandra.cql3.CQL3Type;
-import org.apache.cassandra.cql3.ColumnIdentifier;
-import org.apache.cassandra.db.ColumnFamilyType;
-import org.apache.cassandra.db.composites.*;
+import org.apache.cassandra.cql3.*;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.io.compress.CompressionParameters;
@@ -43,15 +40,18 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 /** A <code>CREATE TABLE</code> parsed from a CQL query statement. */
 public class CreateTableStatement extends SchemaAlteringStatement
 {
-    public CellNameType comparator;
+    private List<AbstractType<?>> keyTypes;
+    private List<AbstractType<?>> clusteringTypes;
     private AbstractType<?> defaultValidator;
-    private AbstractType<?> keyValidator;
+
+    private Map<ByteBuffer, CollectionType> collections = new HashMap<>();
 
     private final List<ByteBuffer> keyAliases = new ArrayList<ByteBuffer>();
     private final List<ByteBuffer> columnAliases = new ArrayList<ByteBuffer>();
     private ByteBuffer valueAlias;
 
     private boolean isDense;
+    private boolean isCompound;
 
     private final Map<ColumnIdentifier, AbstractType> columns = new HashMap<ColumnIdentifier, AbstractType>();
     private final Set<ColumnIdentifier> staticColumns;
@@ -87,7 +87,7 @@ public class CreateTableStatement extends SchemaAlteringStatement
     private List<ColumnDefinition> getColumns(CFMetaData cfm)
     {
         List<ColumnDefinition> columnDefs = new ArrayList<>(columns.size());
-        Integer componentIndex = comparator.isCompound() ? comparator.clusteringPrefixSize() : null;
+        Integer componentIndex = isCompound ? clusteringTypes.size() : null;
         for (Map.Entry<ColumnIdentifier, AbstractType> col : columns.entrySet())
         {
             ColumnIdentifier id = col.getKey();
@@ -95,7 +95,6 @@ public class CreateTableStatement extends SchemaAlteringStatement
                            ? ColumnDefinition.staticDef(cfm, col.getKey().bytes, col.getValue(), componentIndex)
                            : ColumnDefinition.regularDef(cfm, col.getKey().bytes, col.getValue(), componentIndex));
         }
-
         return columnDefs;
     }
 
@@ -135,6 +134,11 @@ public class CreateTableStatement extends SchemaAlteringStatement
         }
     }
 
+    public ClusteringComparator comparator()
+    {
+        return new ClusteringComparator(clusteringTypes, isDense, isCompound);
+    }
+
     /**
      * Returns a CFMetaData instance based on the parameters parsed from this
      * <code>CREATE</code> statement, or defaults where applicable.
@@ -148,7 +152,7 @@ public class CreateTableStatement extends SchemaAlteringStatement
         newCFMD = new CFMetaData(keyspace(),
                                  columnFamily(),
                                  ColumnFamilyType.Standard,
-                                 comparator);
+                                 comparator());
         applyPropertiesTo(newCFMD);
         return newCFMD;
     }
@@ -156,35 +160,28 @@ public class CreateTableStatement extends SchemaAlteringStatement
     public void applyPropertiesTo(CFMetaData cfmd) throws RequestValidationException
     {
         cfmd.defaultValidator(defaultValidator)
-            .keyValidator(keyValidator)
-            .addAllColumnDefinitions(getColumns(cfmd))
-            .isDense(isDense);
+            .keyValidator(keyTypes.size() == 1 ? keyTypes.get(0) : CompositeType.getInstance(keyTypes))
+            .addAllColumnDefinitions(getColumns(cfmd));
 
-        addColumnMetadataFromAliases(cfmd, keyAliases, keyValidator, ColumnDefinition.Kind.PARTITION_KEY);
-        addColumnMetadataFromAliases(cfmd, columnAliases, comparator.asAbstractType(), ColumnDefinition.Kind.CLUSTERING_COLUMN);
+        addColumnMetadataFromAliases(cfmd, keyAliases, keyTypes, ColumnDefinition.Kind.PARTITION_KEY);
+        addColumnMetadataFromAliases(cfmd, columnAliases, clusteringTypes, ColumnDefinition.Kind.CLUSTERING_COLUMN);
         if (valueAlias != null)
-            addColumnMetadataFromAliases(cfmd, Collections.singletonList(valueAlias), defaultValidator, ColumnDefinition.Kind.COMPACT_VALUE);
+            addColumnMetadataFromAliases(cfmd, Collections.<ByteBuffer>singletonList(valueAlias), Collections.<AbstractType<?>>singletonList(defaultValidator), ColumnDefinition.Kind.COMPACT_VALUE);
 
         properties.applyToCFMetadata(cfmd);
     }
 
-    private void addColumnMetadataFromAliases(CFMetaData cfm, List<ByteBuffer> aliases, AbstractType<?> comparator, ColumnDefinition.Kind kind)
+    private void addColumnMetadataFromAliases(CFMetaData metadata, List<ByteBuffer> aliases, List<AbstractType<?>> types, ColumnDefinition.Kind kind)
     {
-        if (comparator instanceof CompositeType)
+        for (int i = 0; i < aliases.size(); ++i)
         {
-            CompositeType ct = (CompositeType)comparator;
-            for (int i = 0; i < aliases.size(); ++i)
-                if (aliases.get(i) != null)
-                    cfm.addOrReplaceColumnDefinition(new ColumnDefinition(cfm, aliases.get(i), ct.types.get(i), i, kind));
-        }
-        else
-        {
-            assert aliases.size() <= 1;
-            if (!aliases.isEmpty() && aliases.get(0) != null)
-                cfm.addOrReplaceColumnDefinition(new ColumnDefinition(cfm, aliases.get(0), comparator, null, kind));
+            if (aliases.get(i) != null)
+            {
+                Integer componentIndex = kind == ColumnDefinition.Kind.PARTITION_KEY && types.size() == 1 ? null : i;
+                metadata.addOrReplaceColumnDefinition(new ColumnDefinition(metadata, aliases.get(i), types.get(i), componentIndex, kind));
+            }
         }
     }
-
 
     public static class RawStatement extends CFStatement
     {
@@ -227,20 +224,14 @@ public class CreateTableStatement extends SchemaAlteringStatement
             CreateTableStatement stmt = new CreateTableStatement(cfName, properties, ifNotExists, staticColumns);
 
             boolean hasCounters = false;
-            Map<ByteBuffer, CollectionType> definedMultiCellCollections = null;
             for (Map.Entry<ColumnIdentifier, CQL3Type.Raw> entry : definitions.entrySet())
             {
                 ColumnIdentifier id = entry.getKey();
                 CQL3Type pt = entry.getValue().prepare(keyspace());
-                if (pt.isCollection() && ((CollectionType) pt.getType()).isMultiCell())
-                {
-                    if (definedMultiCellCollections == null)
-                        definedMultiCellCollections = new HashMap<>();
-                    definedMultiCellCollections.put(id.bytes, (CollectionType) pt.getType());
-                }
+                if (pt.isCollection() && ((CollectionType)pt.getType()).isMultiCell())
+                    stmt.collections.put(id.bytes, (CollectionType)pt.getType());
                 else if (entry.getValue().isCounter())
                     hasCounters = true;
-
                 stmt.columns.put(id, pt.getType()); // we'll remove what is not a column below
             }
 
@@ -252,8 +243,7 @@ public class CreateTableStatement extends SchemaAlteringStatement
                 throw new InvalidRequestException("Cannot set default_time_to_live on a table with counters");
 
             List<ColumnIdentifier> kAliases = keyAliases.get(0);
-
-            List<AbstractType<?>> keyTypes = new ArrayList<AbstractType<?>>(kAliases.size());
+            stmt.keyTypes = new ArrayList<AbstractType<?>>(kAliases.size());
             for (ColumnIdentifier alias : kAliases)
             {
                 stmt.keyAliases.add(alias.bytes);
@@ -262,106 +252,63 @@ public class CreateTableStatement extends SchemaAlteringStatement
                     throw new InvalidRequestException(String.format("counter type is not supported for PRIMARY KEY part %s", alias));
                 if (staticColumns.contains(alias))
                     throw new InvalidRequestException(String.format("Static column %s cannot be part of the PRIMARY KEY", alias));
-                keyTypes.add(t);
+                stmt.keyTypes.add(t);
             }
-            stmt.keyValidator = keyTypes.size() == 1 ? keyTypes.get(0) : CompositeType.getInstance(keyTypes);
 
-            // Dense means that no part of the comparator stores a CQL column name. This means
-            // COMPACT STORAGE with at least one columnAliases (otherwise it's a thrift "static" CF).
-            stmt.isDense = useCompactStorage && !columnAliases.isEmpty();
-
+            stmt.clusteringTypes = new ArrayList<>(columnAliases.size());
             // Handle column aliases
-            if (columnAliases.isEmpty())
+            for (ColumnIdentifier t : columnAliases)
             {
-                if (useCompactStorage)
+                stmt.columnAliases.add(t.bytes);
+
+                AbstractType<?> type = getTypeAndRemove(stmt.columns, t);
+                if (type instanceof CounterColumnType)
+                    throw new InvalidRequestException(String.format("counter type is not supported for PRIMARY KEY part %s", t));
+                if (staticColumns.contains(t))
+                    throw new InvalidRequestException(String.format("Static column %s cannot be part of the PRIMARY KEY", t));
+                stmt.clusteringTypes.add(type);
+            }
+
+            // Dense means that on the thrift side, no part of the "thrift column name" stores a "CQL/metadata column name".
+            // This means COMPACT STORAGE with at least one clustering type (otherwise it's a thrift "static" CF).
+            stmt.isDense = useCompactStorage && !stmt.clusteringTypes.isEmpty();
+            // Compound means that on the thrift side, the "thrift column name" is a composite one. It's the case unless
+            // we use compact storage COMPACT STORAGE and we have either no clustering columns (thrift "static" CF) or
+            // only one of them (if more than one, it's a "dense composite").
+            stmt.isCompound = !(useCompactStorage && stmt.clusteringTypes.size() <= 1);
+
+            // For COMPACT STORAGE, we reject any "feature" that we wouldn't be able to translate back to thrift.
+            if (useCompactStorage)
+            {
+                if (!stmt.collections.isEmpty())
+                    throw new InvalidRequestException("Non-frozen collection types are not supported with COMPACT STORAGE");
+                if (!staticColumns.isEmpty())
+                    throw new InvalidRequestException("Static columns are not supported in COMPACT STORAGE tables");
+
+                if (stmt.clusteringTypes.isEmpty())
                 {
-                    // There should remain some column definition since it is a non-composite "static" CF
+                    // It's a thrift "static CF" so there should be some columns definition
                     if (stmt.columns.isEmpty())
                         throw new InvalidRequestException("No definition found that is not part of the PRIMARY KEY");
-
-                    if (definedMultiCellCollections != null)
-                        throw new InvalidRequestException("Non-frozen collection types are not supported with COMPACT STORAGE");
-
-                    stmt.comparator = new SimpleSparseCellNameType(UTF8Type.instance);
-                }
-                else
-                {
-                    stmt.comparator = definedMultiCellCollections == null
-                                    ? new CompoundSparseCellNameType(Collections.<AbstractType<?>>emptyList())
-                                    : new CompoundSparseCellNameType.WithCollection(Collections.<AbstractType<?>>emptyList(), ColumnToCollectionType.getInstance(definedMultiCellCollections));
-                }
-            }
-            else
-            {
-                // If we use compact storage and have only one alias, it is a
-                // standard "dynamic" CF, otherwise it's a composite
-                if (useCompactStorage && columnAliases.size() == 1)
-                {
-                    if (definedMultiCellCollections != null)
-                        throw new InvalidRequestException("Collection types are not supported with COMPACT STORAGE");
-
-                    ColumnIdentifier alias = columnAliases.get(0);
-                    if (staticColumns.contains(alias))
-                        throw new InvalidRequestException(String.format("Static column %s cannot be part of the PRIMARY KEY", alias));
-
-                    stmt.columnAliases.add(alias.bytes);
-                    AbstractType<?> at = getTypeAndRemove(stmt.columns, alias);
-                    if (at instanceof CounterColumnType)
-                        throw new InvalidRequestException(String.format("counter type is not supported for PRIMARY KEY part %s", stmt.columnAliases.get(0)));
-                    stmt.comparator = new SimpleDenseCellNameType(at);
-                }
-                else
-                {
-                    List<AbstractType<?>> types = new ArrayList<AbstractType<?>>(columnAliases.size() + 1);
-                    for (ColumnIdentifier t : columnAliases)
-                    {
-                        stmt.columnAliases.add(t.bytes);
-
-                        AbstractType<?> type = getTypeAndRemove(stmt.columns, t);
-                        if (type instanceof CounterColumnType)
-                            throw new InvalidRequestException(String.format("counter type is not supported for PRIMARY KEY part %s", t));
-                        if (staticColumns.contains(t))
-                            throw new InvalidRequestException(String.format("Static column %s cannot be part of the PRIMARY KEY", t));
-                        types.add(type);
-                    }
-
-                    if (useCompactStorage)
-                    {
-                        if (definedMultiCellCollections != null)
-                            throw new InvalidRequestException("Collection types are not supported with COMPACT STORAGE");
-
-                        stmt.comparator = new CompoundDenseCellNameType(types);
-                    }
-                    else
-                    {
-                        stmt.comparator = definedMultiCellCollections == null
-                                        ? new CompoundSparseCellNameType(types)
-                                        : new CompoundSparseCellNameType.WithCollection(types, ColumnToCollectionType.getInstance(definedMultiCellCollections));
-                    }
                 }
             }
 
-            if (!staticColumns.isEmpty())
+            if (stmt.clusteringTypes.isEmpty() && !staticColumns.isEmpty())
             {
-                // Only CQL3 tables can have static columns
-                if (useCompactStorage)
-                    throw new InvalidRequestException("Static columns are not supported in COMPACT STORAGE tables");
                 // Static columns only make sense if we have at least one clustering column. Otherwise everything is static anyway
                 if (columnAliases.isEmpty())
                     throw new InvalidRequestException("Static columns are only useful (and thus allowed) if the table has at least one clustering column");
             }
 
-            if (useCompactStorage && !stmt.columnAliases.isEmpty())
+
+            if (stmt.isDense)
             {
                 if (stmt.columns.isEmpty())
                 {
-                    // The only value we'll insert will be the empty one, so the default validator don't matter
+                    // It's a dense table with only PK columns (so no "compact value"). We accept that because
+                    // we're able to translate it to thrift by using a empty value for the "thrift column value".
+                    // But thus the default validator doesn't matter.
                     stmt.defaultValidator = BytesType.instance;
-                    // We need to distinguish between
-                    //   * I'm upgrading from thrift so the valueAlias is null
-                    //   * I've defined my table with only a PK (and the column value will be empty)
-                    // So, we use an empty valueAlias (rather than null) for the second case
-                    stmt.valueAlias = ByteBufferUtil.EMPTY_BYTE_BUFFER;
                 }
                 else
                 {
@@ -377,15 +324,15 @@ public class CreateTableStatement extends SchemaAlteringStatement
             else
             {
                 // For compact, we are in the "static" case, so we need at least one column defined. For non-compact however, having
-                // just the PK is fine since we have CQL3 row marker.
+                // just the PK is fine.
                 if (useCompactStorage && stmt.columns.isEmpty())
                     throw new InvalidRequestException("COMPACT STORAGE with non-composite PRIMARY KEY require one column not part of the PRIMARY KEY, none given");
 
                 // There is no way to insert/access a column that is not defined for non-compact storage, so
                 // the actual validator don't matter much (except that we want to recognize counter CF as limitation apply to them).
                 stmt.defaultValidator = !stmt.columns.isEmpty() && (stmt.columns.values().iterator().next() instanceof CounterColumnType)
-                    ? CounterColumnType.instance
-                    : BytesType.instance;
+                                      ? CounterColumnType.instance
+                                      : BytesType.instance;
             }
 
 

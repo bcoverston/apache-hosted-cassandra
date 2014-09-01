@@ -156,7 +156,7 @@ public class MultiColumnRelation extends Relation
     {
         List<ColumnDefinition> receivers = receivers(cfm);
         Term term = toTerm(receivers(cfm), getValue(), cfm.ksName, boundNames);
-        return new MultiColumnRestriction.Slice(receivers, bound, inclusive, term);
+        return new MultiColumnRestriction.SliceRestriction(receivers, bound, inclusive, term);
     }
 
     @Override

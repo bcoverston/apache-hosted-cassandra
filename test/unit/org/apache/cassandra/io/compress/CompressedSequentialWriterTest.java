@@ -26,7 +26,8 @@ import java.util.Random;
 import static org.junit.Assert.assertEquals;
 import org.junit.Test;
 
-import org.apache.cassandra.db.composites.SimpleDenseCellNameType;
+import org.apache.cassandra.db.ClusteringComparator;
+import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.FileMark;
@@ -75,7 +76,7 @@ public class CompressedSequentialWriterTest
         {
             final String filename = f.getAbsolutePath();
 
-            MetadataCollector sstableMetadataCollector = new MetadataCollector(new SimpleDenseCellNameType(BytesType.instance)).replayPosition(null);
+            MetadataCollector sstableMetadataCollector = new MetadataCollector(new ClusteringComparator(Arrays.<AbstractType<?>>asList(BytesType.instance), true, false)).replayPosition(null);
             CompressedSequentialWriter writer = new CompressedSequentialWriter(f, filename + ".metadata", new CompressionParameters(compressor), sstableMetadataCollector);
 
             byte[] dataPre = new byte[bytesToTest];

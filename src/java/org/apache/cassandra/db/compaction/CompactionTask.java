@@ -39,9 +39,13 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.PartitionColumns;
+import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.SystemKeyspace;
+import org.apache.cassandra.db.atoms.AtomStats;
 import org.apache.cassandra.db.compaction.CompactionManager.CompactionExecutorStatsCollector;
 import org.apache.cassandra.io.sstable.SSTableRewriter;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
@@ -172,7 +176,7 @@ public class CompactionTask extends AbstractCompactionTask
             try (AbstractCompactionStrategy.ScannerList scanners = strategy.getScanners(actuallyCompact))
             {
                 ci = new CompactionIterable(compactionType, scanners.scanners, controller, sstableFormat);
-                Iterator<AbstractCompactedRow> iter = ci.iterator();
+
                 // we can't preheat until the tracker has been set. This doesn't happen until we tell the cfs to
                 // replace the old entries.  Track entries to preheat here until then.
                 long minRepairedAt = getMinRepairedAt(actuallyCompact);
@@ -184,7 +188,7 @@ public class CompactionTask extends AbstractCompactionTask
                 SSTableRewriter writer = new SSTableRewriter(cfs, sstables, maxAge, offline);
                 try
                 {
-                    if (!iter.hasNext())
+                    if (!ci.hasNext())
                     {
                         // don't mark compacted in the finally block, since if there _is_ nondeleted data,
                         // we need to sync it (via closeAndOpen) first, so there is no period during which
@@ -194,13 +198,12 @@ public class CompactionTask extends AbstractCompactionTask
                     }
 
                     writer.switchWriter(createCompactionWriter(cfs.directories.getLocationForDisk(getWriteDirectory(expectedSSTableSize)), keysPerSSTable, minRepairedAt, sstableFormat));
-                    while (iter.hasNext())
+                    while (ci.hasNext())
                     {
                         if (ci.isStopRequested())
                             throw new CompactionInterruptedException(ci.getCompactionInfo());
 
-                        AbstractCompactedRow row = iter.next();
-                        if (writer.append(row) != null)
+                        if (writer.append(ci.next()) != null)
                         {
                             totalKeysWritten++;
                             if (newSSTableSegmentThresholdReached(writer.currentWriter()))
@@ -304,16 +307,42 @@ public class CompactionTask extends AbstractCompactionTask
     private SSTableWriter createCompactionWriter(File sstableDirectory, long keysPerSSTable, long repairedAt, SSTableFormat.Type type)
     {
         return SSTableWriter.create(Descriptor.fromFilename(cfs.getTempSSTablePath(sstableDirectory), type),
-                keysPerSSTable,
-                repairedAt,
-                cfs.metadata,
-                cfs.partitioner,
-                new MetadataCollector(sstables, cfs.metadata.comparator, getLevel()));
+                                    keysPerSSTable,
+                                    repairedAt,
+                                    cfs.metadata,
+                                    cfs.partitioner,
+                                    new MetadataCollector(sstables, cfs.metadata.comparator, getLevel()),
+                                    makeSerializationHeader(cfs.metadata, sstables));
     }
 
     protected int getLevel()
     {
         return 0;
+    }
+
+    public static SerializationHeader makeSerializationHeader(CFMetaData metadata, Collection<SSTableReader> sstables)
+    {
+        // The serialization header has to be computed before the start of compaction (since it's used to write)
+        // the result. This means that when compacting multiple sources, we won't have perfectly accurate stats
+        // (for AtomStats) since compaction may delete, purge and generally merge rows in unknown ways. This is
+        // kind of ok because those stats are only used for optimizing the underlying storage format and so we
+        // just have to strive for as good as possible. Currently, we stick to a relatively naive merge of existing
+        // global stats because it's simple and probably good enough in most situation but we could probably
+        // improve our marging of inaccuracy through the use of more fine-grained stats in the future.
+        // Note however that to avoid seeing our accuracy degrade through successive compactions, we don't base
+        // our stats merging on the compacted files headers, which as we just said can be somewhat inaccurate,
+        // but rather on their stats stored in StatsMetadata that are fully accurate.
+        AtomStats.Collector stats = new AtomStats.Collector();
+        PartitionColumns.Builder columns = PartitionColumns.builder();
+        for (SSTableReader sstable : sstables)
+        {
+            stats.updateTimestamp(sstable.getMinTimestamp());
+            stats.updateLocalDeletionTime(sstable.getMinLocalDeletionTime());
+            stats.updateTTL(sstable.getMinTTL());
+            stats.updateColumnSetPerRow(sstable.getTotalColumnsSet(), sstable.getTotalRows());
+            columns.addAll(sstable.header.columns());
+        }
+        return new SerializationHeader(metadata, columns.build(), stats.get(), true);
     }
 
     protected CompactionController getCompactionController(Set<SSTableReader> toCompact)

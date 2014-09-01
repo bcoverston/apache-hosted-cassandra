@@ -112,6 +112,9 @@ public abstract class AbstractBounds<T extends RingPosition<T>> implements Seria
     protected abstract String getOpeningString();
     protected abstract String getClosingString();
 
+    public abstract boolean isStartInclusive();
+    public abstract boolean isEndInclusive();
+
     public abstract AbstractBounds<T> withNewRight(T newRight);
 
     public static class AbstractBoundsSerializer<T extends RingPosition<T>> implements IPartitionerDependentSerializer<AbstractBounds<T>>

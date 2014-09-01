@@ -22,6 +22,8 @@ import java.util.Collection;
 import java.util.List;
 
 import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.ListMultimap;
+import com.google.common.collect.Multimaps;
 
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.cql3.*;
@@ -39,7 +41,7 @@ public abstract class Functions
 
     private Functions() {}
 
-    private static final ArrayListMultimap<FunctionName, Function> declared = ArrayListMultimap.create();
+    private static final ListMultimap<FunctionName, Function> declared = Multimaps.synchronizedListMultimap(ArrayListMultimap.<FunctionName, Function>create());
 
     static
     {
@@ -254,7 +256,7 @@ public abstract class Functions
     public static void addFunction(AbstractFunction fun)
     {
         // We shouldn't get there unless that function don't exist
-        assert find(fun.name(), fun.argTypes()) == null;
+        assert find(fun.name(), fun.argTypes()) == null : fun.name() + " already exists";
         declare(fun);
     }
 
@@ -276,15 +278,22 @@ public abstract class Functions
     public static List<Function> getReferencesTo(Function old)
     {
         List<Function> references = new ArrayList<>();
-        for (Function function : declared.values())
-            if (function.hasReferenceTo(old))
-                references.add(function);
+
+        synchronized (declared)
+        {
+            for (Function function : declared.values())
+                if (function.hasReferenceTo(old))
+                    references.add(function);
+        }
         return references;
     }
 
     public static Collection<Function> all()
     {
-        return declared.values();
+        synchronized (declared)
+        {
+            return new ArrayList<>(declared.values());
+        }
     }
 
     public static boolean typeEquals(AbstractType<?> t1, AbstractType<?> t2)

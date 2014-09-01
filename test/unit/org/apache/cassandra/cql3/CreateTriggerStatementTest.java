@@ -24,8 +24,8 @@ import java.util.Collections;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.config.TriggerDefinition;
-import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.Mutation;
+import org.apache.cassandra.db.partitions.Partition;
 import org.apache.cassandra.triggers.ITrigger;
 import org.junit.Test;
 
@@ -113,7 +113,7 @@ public class CreateTriggerStatementTest extends CQLTester
 
     public static class TestTrigger implements ITrigger
     {
-        public Collection<Mutation> augment(ByteBuffer key, ColumnFamily update)
+        public Collection<Mutation> augment(Partition update)
         {
             return Collections.emptyList();
         }

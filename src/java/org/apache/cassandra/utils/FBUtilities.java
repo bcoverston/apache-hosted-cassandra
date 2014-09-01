@@ -377,6 +377,11 @@ public class FBUtilities
         return System.currentTimeMillis() * 1000;
     }
 
+    public static int nowInSeconds()
+    {
+        return (int)(System.currentTimeMillis() / 1000);
+    }
+
     public static void waitOnFutures(Iterable<Future<?>> futures)
     {
         for (Future f : futures)
@@ -516,6 +521,11 @@ public class FBUtilities
         SortedSet<T> s = new TreeSet<T>(comparator);
         s.add(column);
         return s;
+    }
+
+    public static <T> SortedSet<T> emptySortedSet(Comparator<? super T> comparator)
+    {
+        return new TreeSet<T>(comparator);
     }
 
     public static String toString(Map<?,?> map)
@@ -799,5 +809,10 @@ public class FBUtilities
         digest.update((byte) ((val >>> 16) & 0xFF));
         digest.update((byte) ((val >>>  8) & 0xFF));
         digest.update((byte)  ((val >>> 0) & 0xFF));
+    }
+
+    public static void updateWithBoolean(MessageDigest digest, boolean val)
+    {
+        updateWithByte(digest, val ? 0 : 1);
     }
 }

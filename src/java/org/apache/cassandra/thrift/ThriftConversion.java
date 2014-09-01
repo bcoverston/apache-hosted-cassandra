@@ -29,17 +29,15 @@ import org.apache.cassandra.config.*;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.cql3.UntypedResultSet;
-import org.apache.cassandra.db.ColumnFamilyType;
-import org.apache.cassandra.schema.LegacySchemaTables;
-import org.apache.cassandra.db.WriteType;
-import org.apache.cassandra.db.composites.CellNameType;
-import org.apache.cassandra.db.composites.CellNames;
+import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.io.compress.CompressionParameters;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.apache.cassandra.locator.LocalStrategy;
 import org.apache.cassandra.serializers.MarshalException;
+import org.apache.cassandra.schema.LegacySchemaTables;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.UUIDGen;
 
@@ -48,6 +46,10 @@ import org.apache.cassandra.utils.UUIDGen;
  */
 public class ThriftConversion
 {
+    public static final String DEFAULT_KEY_ALIAS = "key";
+    public static final String DEFAULT_COLUMN_ALIAS = "column";
+    public static final String DEFAULT_VALUE_ALIAS = "value";
+
     public static org.apache.cassandra.db.ConsistencyLevel fromThrift(ConsistencyLevel cl)
     {
         switch (cl)
@@ -136,20 +138,20 @@ public class ThriftConversion
         return new TimedOutException();
     }
 
-    public static List<org.apache.cassandra.db.IndexExpression> indexExpressionsFromThrift(List<IndexExpression> exprs)
+    public static ColumnFilter indexExpressionsFromThrift(CFMetaData metadata, List<IndexExpression> exprs)
     {
         if (exprs == null)
             return null;
 
         if (exprs.isEmpty())
-            return Collections.emptyList();
+            return ColumnFilter.NONE;
 
-        List<org.apache.cassandra.db.IndexExpression> converted = new ArrayList<>(exprs.size());
+        ColumnFilter converted = new ColumnFilter(exprs.size());
         for (IndexExpression expr : exprs)
         {
-            converted.add(new org.apache.cassandra.db.IndexExpression(expr.column_name,
-                                                                      Operator.valueOf(expr.op.name()),
-                                                                      expr.value));
+            converted.add(metadata.getColumnDefinition(expr.column_name),
+                          Operator.valueOf(expr.op.name()),
+                          expr.value);
         }
         return converted;
     }
@@ -184,17 +186,17 @@ public class ThriftConversion
     public static CFMetaData fromThrift(CfDef cf_def)
     throws org.apache.cassandra.exceptions.InvalidRequestException, ConfigurationException
     {
-        return internalFromThrift(cf_def, Collections.<ColumnDefinition>emptyList());
+        return internalFromThrift(cf_def, Collections.<ColumnDefinition>emptyList(), true);
     }
 
     public static CFMetaData fromThriftForUpdate(CfDef cf_def, CFMetaData toUpdate)
     throws org.apache.cassandra.exceptions.InvalidRequestException, ConfigurationException
     {
-        return internalFromThrift(cf_def, toUpdate.allColumns());
+        return internalFromThrift(cf_def, toUpdate.allColumns(), false);
     }
 
     // Convert a thrift CfDef, given a list of ColumnDefinitions to copy over to the created CFMetadata before the CQL metadata are rebuild
-    private static CFMetaData internalFromThrift(CfDef cf_def, Collection<ColumnDefinition> previousCQLMetadata)
+    private static CFMetaData internalFromThrift(CfDef cf_def, Collection<ColumnDefinition> previousCQLMetadata, boolean isCreation)
     throws org.apache.cassandra.exceptions.InvalidRequestException, ConfigurationException
     {
         ColumnFamilyType cfType = ColumnFamilyType.create(cf_def.column_type);
@@ -207,21 +209,20 @@ public class ThriftConversion
         {
             AbstractType<?> rawComparator = TypeParser.parse(cf_def.comparator_type);
             AbstractType<?> subComparator = cfType == ColumnFamilyType.Standard
-                    ? null
-                    : cf_def.subcomparator_type == null ? BytesType.instance : TypeParser.parse(cf_def.subcomparator_type);
-
-            AbstractType<?> fullRawComparator = CFMetaData.makeRawAbstractType(rawComparator, subComparator);
+                                          ? null
+                                          : cf_def.subcomparator_type == null ? BytesType.instance : TypeParser.parse(cf_def.subcomparator_type);
 
             AbstractType<?> keyValidator = cf_def.isSetKey_validation_class() ? TypeParser.parse(cf_def.key_validation_class) : null;
+            AbstractType<?> defaultValidator = TypeParser.parse(cf_def.default_validation_class);
 
             // Convert the REGULAR definitions from the input CfDef
             List<ColumnDefinition> defs = fromThrift(cf_def.keyspace, cf_def.name, rawComparator, subComparator, cf_def.column_metadata);
 
-            // Add the keyAlias if there is one, since that's on CQL metadata that thrift can actually change (for
+            // Add the keyAlias if there is one, since that's a CQL metadata that thrift can actually change (for
             // historical reasons)
             boolean hasKeyAlias = cf_def.isSetKey_alias() && keyValidator != null && !(keyValidator instanceof CompositeType);
             if (hasKeyAlias)
-                defs.add(ColumnDefinition.partitionKeyDef(cf_def.keyspace, cf_def.name, cf_def.key_alias, keyValidator, null));
+                defs.add(ColumnDefinition.partitionKeyDef(cf_def.keyspace, cf_def.name, UTF8Type.instance.getString(cf_def.key_alias), keyValidator, null));
 
             // Now add any CQL metadata that we want to copy, skipping the keyAlias if there was one
             for (ColumnDefinition def : previousCQLMetadata)
@@ -236,13 +237,24 @@ public class ThriftConversion
                 defs.add(def);
             }
 
-            CellNameType comparator = CellNames.fromAbstractType(fullRawComparator, CFMetaData.calculateIsDense(fullRawComparator, defs));
-
             UUID cfId = Schema.instance.getId(cf_def.keyspace, cf_def.name);
             if (cfId == null)
                 cfId = UUIDGen.getTimeUUID();
 
-            CFMetaData newCFMD = new CFMetaData(cf_def.keyspace, cf_def.name, cfType, comparator, cfId);
+            ClusteringComparator cc = CFMetaData.makeComparator(rawComparator, subComparator, subComparator != null ? true : calculateIsDense(rawComparator, defs));
+            CFMetaData newCFMD = new CFMetaData(cf_def.keyspace, cf_def.name, cfType, cc, cfId);
+            if (!cc.isDense && !cc.isCompound)
+                newCFMD.columnNameComparator = rawComparator;
+
+            // If it's a thrift table creation, adds the default CQL metadata for the new table
+            if (isCreation)
+                addDefaultCQLMetadata(defs,
+                                      cf_def.keyspace,
+                                      cf_def.name,
+                                      hasKeyAlias ? null : keyValidator,
+                                      rawComparator,
+                                      subComparator,
+                                      cc.isDense ? defaultValidator : null);
 
             newCFMD.addAllColumnDefinitions(defs);
 
@@ -280,7 +292,7 @@ public class ThriftConversion
                 newCFMD.triggers(triggerDefinitionsFromThrift(cf_def.triggers));
 
             return newCFMD.comment(cf_def.comment)
-                          .defaultValidator(TypeParser.parse(cf_def.default_validation_class))
+                          .defaultValidator(defaultValidator)
                           .compressionParameters(CompressionParameters.create(cf_def.compression_options))
                           .rebuild();
         }
@@ -288,6 +300,105 @@ public class ThriftConversion
         {
             throw new ConfigurationException(e.getMessage());
         }
+    }
+
+    private static void addDefaultCQLMetadata(Collection<ColumnDefinition> defs,
+                                              String ks,
+                                              String cf,
+                                              AbstractType<?> keyValidator,
+                                              AbstractType<?> comparator,
+                                              AbstractType<?> subComparator,
+                                              AbstractType<?> defaultValidator)
+    {
+        if (keyValidator != null)
+        {
+            if (keyValidator instanceof CompositeType)
+            {
+                List<AbstractType<?>> subTypes = ((CompositeType)keyValidator).types;
+                for (int i = 0; i < subTypes.size(); i++)
+                {
+                    // For compatibility sake, we call the first alias 'key' rather than 'key1'. This
+                    // is inconsistent with column alias, but it's probably not worth risking breaking compatibility now.
+                    String name = i == 0 ? DEFAULT_KEY_ALIAS : DEFAULT_KEY_ALIAS + (i + 1);
+                    defs.add(ColumnDefinition.partitionKeyDef(ks, cf, name, subTypes.get(i), i));
+                }
+            }
+            else
+            {
+                defs.add(ColumnDefinition.partitionKeyDef(ks, cf, DEFAULT_KEY_ALIAS, keyValidator, null));
+            }
+        }
+
+        if (subComparator == null)
+        {
+            if (comparator instanceof CompositeType)
+            {
+                List<AbstractType<?>> subTypes = ((CompositeType)comparator).types;
+                for (int i = 0; i < subTypes.size(); i++)
+                    defs.add(ColumnDefinition.clusteringKeyDef(ks, cf, DEFAULT_KEY_ALIAS + (i + 1), subTypes.get(i), i));
+            }
+            else
+            {
+                defs.add(ColumnDefinition.clusteringKeyDef(ks, cf, DEFAULT_KEY_ALIAS, comparator, null));
+            }
+        }
+        else
+        {
+            defs.add(ColumnDefinition.clusteringKeyDef(ks, cf, DEFAULT_KEY_ALIAS + 1, comparator, 0));
+            defs.add(ColumnDefinition.clusteringKeyDef(ks, cf, DEFAULT_KEY_ALIAS + 2, subComparator, 1));
+        }
+
+        if (defaultValidator != null)
+            defs.add(ColumnDefinition.compactValueDef(ks, cf, DEFAULT_VALUE_ALIAS, defaultValidator));
+    }
+
+    /*
+     * We call dense a CF for which each component of the comparator is a clustering column, i.e. no
+     * component is used to store a regular column names. In other words, non-composite static "thrift"
+     * and CQL3 CF are *not* dense.
+     * We save whether the table is dense or not during table creation through CQL, but we don't have this
+     * information for table just created through thrift, nor for table prior to CASSANDRA-7744, so this
+     * method does its best to infer whether the table is dense or not based on other elements.
+     */
+    public static boolean calculateIsDense(AbstractType<?> comparator, Collection<ColumnDefinition> defs)
+    {
+        /*
+         * As said above, this method is only here because we need to deal with thrift upgrades.
+         * Once a CF has been "upgraded", i.e. we've rebuilt and save its CQL3 metadata at least once,
+         * then we'll have saved the "is_dense" value and will be good to go.
+         *
+         * But non-upgraded thrift CF (and pre-7744 CF) will have no value for "is_dense", so we need
+         * to infer that information without relying on it in that case. And for the most part this is
+         * easy, a CF that has at least one REGULAR definition is not dense. But the subtlety is that not
+         * having a REGULAR definition may not mean dense because of CQL3 definitions that have only the
+         * PRIMARY KEY defined.
+         *
+         * So we need to recognize those special case CQL3 table with only a primary key. If we have some
+         * clustering columns, we're fine as said above. So the only problem is that we cannot decide for
+         * sure if a CF without REGULAR columns nor CLUSTERING_COLUMN definition is meant to be dense, or if it
+         * has been created in CQL3 by say:
+         *    CREATE TABLE test (k int PRIMARY KEY)
+         * in which case it should not be dense. However, we can limit our margin of error by assuming we are
+         * in the latter case only if the comparator is exactly CompositeType(UTF8Type).
+         */
+        boolean hasRegular = false;
+        int maxClusteringIdx = -1;
+        for (ColumnDefinition def : defs)
+        {
+            switch (def.kind)
+            {
+                case CLUSTERING_COLUMN:
+                    maxClusteringIdx = Math.max(maxClusteringIdx, def.position());
+                    break;
+                case REGULAR:
+                    hasRegular = true;
+                    break;
+            }
+        }
+
+        return maxClusteringIdx >= 0
+             ? maxClusteringIdx == comparator.componentsCount() - 1
+             : !hasRegular && !CFMetaData.isCQL3OnlyPKComparator(comparator);
     }
 
     /** applies implicit defaults to cf definition. useful in updates */

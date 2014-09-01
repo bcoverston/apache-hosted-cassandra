@@ -20,6 +20,7 @@ package org.apache.cassandra.db.compaction;
 import com.google.common.base.Throwables;
 import com.google.common.collect.Sets;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.atoms.AtomIterator;
 
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
@@ -31,6 +32,7 @@ import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.service.ActiveRepairService;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.OutputHandler;
 
@@ -70,7 +72,7 @@ public class Verifier implements Closeable
         this.cfs = cfs;
         this.sstable = sstable;
         this.outputHandler = outputHandler;
-        this.rowIndexEntrySerializer = sstable.descriptor.version.getSSTableFormat().getIndexSerializer(sstable.metadata);
+        this.rowIndexEntrySerializer = sstable.descriptor.version.getSSTableFormat().getIndexSerializer(sstable.metadata, sstable.descriptor.version, sstable.header);
 
         this.controller = new VerifyController(cfs);
 
@@ -125,7 +127,7 @@ public class Verifier implements Closeable
         {
             ByteBuffer nextIndexKey = ByteBufferUtil.readWithShortLength(indexFile);
             {
-                long firstRowPositionFromIndex = rowIndexEntrySerializer.deserialize(indexFile, sstable.descriptor.version).position;
+                long firstRowPositionFromIndex = rowIndexEntrySerializer.deserialize(indexFile).position;
                 if (firstRowPositionFromIndex != 0)
                     markAndThrow();
             }
@@ -160,7 +162,7 @@ public class Verifier implements Closeable
                     nextIndexKey = indexFile.isEOF() ? null : ByteBufferUtil.readWithShortLength(indexFile);
                     nextRowPositionFromIndex = indexFile.isEOF()
                                              ? dataFile.length()
-                                             : rowIndexEntrySerializer.deserialize(indexFile, sstable.descriptor.version).position;
+                                             : rowIndexEntrySerializer.deserialize(indexFile).position;
                 }
                 catch (Throwable th)
                 {
@@ -184,7 +186,10 @@ public class Verifier implements Closeable
                     if (key == null || dataSize > dataFile.length())
                         markAndThrow();
 
-                    SSTableIdentityIterator atoms = new SSTableIdentityIterator(sstable, dataFile, key, true);
+                    try (AtomIterator atoms = new SSTableIdentityIterator(sstable, dataFile, key, FBUtilities.nowInSeconds()))
+                    {
+                    }
+
                     if ( (prevKey != null && prevKey.compareTo(key) > 0) || !key.getKey().equals(currentIndexKey) || dataStart != dataStartFromIndex )
                         markAndThrow();
                     
