@@ -1089,9 +1089,11 @@
      </classpath>
 	 <compilerarg value="-XDignore.symbol.file"/>
      <src path="${test.unit.src}"/>
+      <!--
      <src path="${test.long.src}"/>
      <src path="${test.pig.src}"/>
      <src path="${test.microbench.src}"/>
+      -->
     </javac>
 
     <!-- Non-java resources needed by the test suite -->
@@ -1296,6 +1298,7 @@
     </testmacro>
   </target>
 
+  <!--
   <target name="long-test" depends="build-test" description="Execute functional tests">
     <testmacro suitename="long" inputdir="${test.long.src}"
                timeout="${test.long.timeout}">
@@ -1303,6 +1306,7 @@
       <jvmarg value="-Dcassandra.tolerate_sstable_size=true"/>
     </testmacro>
   </target>
+  -->
 
   <target name="cql-test" depends="build-test" description="Execute CQL tests">
     <sequential>
@@ -1375,14 +1379,16 @@
     </sequential>
   </target>
 
+  <!--
   <target name="pig-test" depends="build-test,maven-ant-tasks-retrieve-pig-test" description="Excute Pig tests">
     <testmacro suitename="pig" inputdir="${test.pig.src}" 
                timeout="1200000">
     </testmacro>
   </target>
+  -->
 
   <target name="test-all" 
-          depends="test,long-test,test-compression,pig-test,test-clientutil-jar" 
+          depends="test,test-compression,test-clientutil-jar" 
           description="Run all tests" />
   
   <!-- Use JaCoCo ant extension without needing externally saved lib -->
