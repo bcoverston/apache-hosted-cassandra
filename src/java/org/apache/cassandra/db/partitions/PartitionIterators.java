@@ -381,7 +381,7 @@ public abstract class PartitionIterators
             out.writeBoolean(false);
         }
 
-        public PartitionIterator deserialize(final DataInput in, final int version, final LegacyLayout.Flag flag) throws IOException
+        public PartitionIterator deserialize(final DataInput in, final int version, final SerializationHelper.Flag flag) throws IOException
         {
             if (version < MessagingService.VERSION_30)
                 throw new UnsupportedOperationException();

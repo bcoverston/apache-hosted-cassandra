@@ -48,7 +48,7 @@ public class SSTableIdentityIterator extends SSTableAtomIterator implements Comp
     {
         super(file,
               sstable.header,
-              new SerializationHelper(sstable.descriptor.version.correspondingMessagingVersion(), LegacyLayout.Flag.LOCAL, nowInSec));
+              new SerializationHelper(sstable.descriptor.version.correspondingMessagingVersion(), SerializationHelper.Flag.LOCAL, nowInSec));
         this.sstable = sstable;
         this.filename = file.getPath();
         this.key = key;

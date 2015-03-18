@@ -144,7 +144,7 @@ public class PartitionUpdate extends AbstractPartitionData implements Iterable<R
         {
             return serializer.deserialize(new DataInputStream(ByteBufferUtil.inputStream(bytes)),
                                           version,
-                                          LegacyLayout.Flag.LOCAL,
+                                          SerializationHelper.Flag.LOCAL,
                                           version < MessagingService.VERSION_30 ? key : null);
         }
         catch (IOException e)
@@ -638,7 +638,7 @@ public class PartitionUpdate extends AbstractPartitionData implements Iterable<R
             }
         }
 
-        public PartitionUpdate deserialize(DataInput in, int version, LegacyLayout.Flag flag, DecoratedKey key) throws IOException
+        public PartitionUpdate deserialize(DataInput in, int version, SerializationHelper.Flag flag, DecoratedKey key) throws IOException
         {
             if (version < MessagingService.VERSION_30)
             {

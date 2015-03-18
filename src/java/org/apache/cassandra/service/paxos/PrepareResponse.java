@@ -26,8 +26,8 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.UUID;
 
-import org.apache.cassandra.db.LegacyLayout;
 import org.apache.cassandra.db.TypeSizes;
+import org.apache.cassandra.db.atoms.SerializationHelper;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataOutputPlus;
@@ -91,7 +91,7 @@ public class PrepareResponse
             if (version < MessagingService.VERSION_30)
             {
                 UUID ballot = UUIDSerializer.serializer.deserialize(in, version);
-                PartitionUpdate update = PartitionUpdate.serializer.deserialize(in, version, LegacyLayout.Flag.LOCAL, inProgress.update.partitionKey());
+                PartitionUpdate update = PartitionUpdate.serializer.deserialize(in, version, SerializationHelper.Flag.LOCAL, inProgress.update.partitionKey());
                 mostRecent = new Commit(ballot, update);
             }
             else

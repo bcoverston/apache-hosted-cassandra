@@ -188,7 +188,7 @@ public class StreamReader
         {
             this.metadata = metadata;
             this.in = in;
-            this.helper = new SerializationHelper(version.correspondingMessagingVersion(), LegacyLayout.Flag.PRESERVE_SIZE, FBUtilities.nowInSeconds());
+            this.helper = new SerializationHelper(version.correspondingMessagingVersion(), SerializationHelper.Flag.PRESERVE_SIZE, FBUtilities.nowInSeconds());
             this.header = header;
         }
 

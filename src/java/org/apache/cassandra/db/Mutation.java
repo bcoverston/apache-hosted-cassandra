@@ -27,6 +27,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
+import org.apache.cassandra.db.atoms.SerializationHelper;
 import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataOutputPlus;
@@ -266,7 +267,7 @@ public class Mutation implements IMutation
                 PartitionUpdate.serializer.serialize(entry.getValue(), out, version);
         }
 
-        public Mutation deserialize(DataInput in, int version, LegacyLayout.Flag flag) throws IOException
+        public Mutation deserialize(DataInput in, int version, SerializationHelper.Flag flag) throws IOException
         {
             String keyspaceName = null; // will always be set from cf.metadata but javac isn't smart enough to see that
             if (version < MessagingService.VERSION_20)
@@ -300,7 +301,7 @@ public class Mutation implements IMutation
 
         public Mutation deserialize(DataInput in, int version) throws IOException
         {
-            return deserialize(in, version, LegacyLayout.Flag.FROM_REMOTE);
+            return deserialize(in, version, SerializationHelper.Flag.FROM_REMOTE);
         }
 
         public long serializedSize(Mutation mutation, int version)

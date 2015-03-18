@@ -25,7 +25,23 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class SerializationHelper
 {
-    private final LegacyLayout.Flag flag;
+    /**
+     * Flag affecting deserialization behavior.
+     *  - LOCAL: for deserialization of local data (Expired columns are
+     *      converted to tombstones (to gain disk space)).
+     *  - FROM_REMOTE: for deserialization of data received from remote hosts
+     *      (Expired columns are converted to tombstone and counters have
+     *      their delta cleared)
+     *  - PRESERVE_SIZE: used when no transformation must be performed, i.e,
+     *      when we must ensure that deserializing and reserializing the
+     *      result yield the exact same bytes. Streaming uses this.
+     */
+    public static enum Flag
+    {
+        LOCAL, FROM_REMOTE, PRESERVE_SIZE;
+    }
+
+    private final Flag flag;
     public final int nowInSec;
     public final int version;
 
@@ -37,7 +53,7 @@ public class SerializationHelper
     private int rowTTL;
     private int rowLocalDeletionTime;
 
-    public SerializationHelper(int version, LegacyLayout.Flag flag, int nowInSec)
+    public SerializationHelper(int version, Flag flag, int nowInSec)
     {
         this.flag = flag;
         this.nowInSec = nowInSec;
@@ -78,7 +94,7 @@ public class SerializationHelper
     private boolean canExpire(LivenessInfo info)
     {
         return info.hasTTL()
-            && flag != LegacyLayout.Flag.PRESERVE_SIZE
+            && flag != Flag.PRESERVE_SIZE
             && !info.isLive(nowInSec);
     }
 
@@ -95,7 +111,7 @@ public class SerializationHelper
 
         if (isCounter)
         {
-            if (flag == LegacyLayout.Flag.FROM_REMOTE || (flag == LegacyLayout.Flag.LOCAL && Cells.counterContextManager.shouldClearLocal(value)))
+            if (flag == Flag.FROM_REMOTE || (flag == Flag.LOCAL && Cells.counterContextManager.shouldClearLocal(value)))
                 value = Cells.counterContextManager.clearAllLocal(value);
         }
         else

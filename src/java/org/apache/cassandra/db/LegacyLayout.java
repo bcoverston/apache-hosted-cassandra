@@ -43,22 +43,6 @@ import static org.apache.cassandra.io.sstable.IndexHelper.IndexInfo;
  */
 public class LegacyLayout
 {
-    /**
-     * Flag affecting deserialization behavior.
-     *  - LOCAL: for deserialization of local data (Expired columns are
-     *      converted to tombstones (to gain disk space)).
-     *  - FROM_REMOTE: for deserialization of data received from remote hosts
-     *      (Expired columns are converted to tombstone and counters have
-     *      their delta cleared)
-     *  - PRESERVE_SIZE: used when no transformation must be performed, i.e,
-     *      when we must ensure that deserializing and reserializing the
-     *      result yield the exact same bytes. Streaming uses this.
-     */
-    public static enum Flag
-    {
-        LOCAL, FROM_REMOTE, PRESERVE_SIZE;
-    }
-
     public final static int DELETION_MASK        = 0x01;
     public final static int EXPIRATION_MASK      = 0x02;
     public final static int COUNTER_MASK         = 0x04;

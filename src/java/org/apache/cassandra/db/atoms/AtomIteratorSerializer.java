@@ -187,7 +187,7 @@ public class AtomIteratorSerializer
         return size;
     }
 
-    public Header deserializeHeader(DataInput in, int version, LegacyLayout.Flag flag) throws IOException
+    public Header deserializeHeader(DataInput in, int version, SerializationHelper.Flag flag) throws IOException
     {
         CFMetaData metadata = CFMetaData.serializer.deserialize(in, version);
         DecoratedKey key = StorageService.getPartitioner().decorateKey(metadata.getKeyValidator().readValue(in));
@@ -221,7 +221,7 @@ public class AtomIteratorSerializer
         while (AtomSerializer.serializer.deserialize(in, header, helper, rowWriter, markerWriter) != null);
     }
 
-    public AtomIterator deserialize(final DataInput in, int version, LegacyLayout.Flag flag) throws IOException
+    public AtomIterator deserialize(final DataInput in, int version, SerializationHelper.Flag flag) throws IOException
     {
         final Header h = deserializeHeader(in, version, flag);
 

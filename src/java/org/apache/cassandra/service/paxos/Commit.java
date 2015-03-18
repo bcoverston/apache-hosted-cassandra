@@ -174,7 +174,7 @@ public class Commit
                 key = StorageService.getPartitioner().decorateKey(ByteBufferUtil.readWithShortLength(in));
 
             UUID ballot = UUIDSerializer.serializer.deserialize(in, version);
-            PartitionUpdate update = PartitionUpdate.serializer.deserialize(in, version, LegacyLayout.Flag.LOCAL, key);
+            PartitionUpdate update = PartitionUpdate.serializer.deserialize(in, version, SerializationHelper.Flag.LOCAL, key);
             return new Commit(ballot, update);
         }
 

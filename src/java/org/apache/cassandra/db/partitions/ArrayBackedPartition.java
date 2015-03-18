@@ -218,7 +218,7 @@ public class ArrayBackedPartition extends AbstractPartitionData implements Cache
             //   2) saves the creation of a temporary iterator: atoms are directly written to the partition, which
             //      is slightly faster.
 
-            AtomIteratorSerializer.Header h = AtomIteratorSerializer.serializer.deserializeHeader(in, MessagingService.current_version, LegacyLayout.Flag.LOCAL);
+            AtomIteratorSerializer.Header h = AtomIteratorSerializer.serializer.deserializeHeader(in, MessagingService.current_version, SerializationHelper.Flag.LOCAL);
             assert !h.isReversed && h.rowEstimate >= 0;
 
             ArrayBackedPartition partition = new ArrayBackedPartition(h.metadata, h.key, h.partitionDeletion, h.sHeader.columns(), h.rowEstimate, false, h.nowInSec);
@@ -227,7 +227,7 @@ public class ArrayBackedPartition extends AbstractPartitionData implements Cache
             Writer writer = partition.new Writer(h.nowInSec);
             RangeTombstoneMarker.Writer markerWriter = partition.new RangeTombstoneCollector();
 
-            AtomIteratorSerializer.serializer.deserializeAtoms(in, new SerializationHelper(MessagingService.current_version, LegacyLayout.Flag.LOCAL, h.nowInSec), h.sHeader, writer, markerWriter);
+            AtomIteratorSerializer.serializer.deserializeAtoms(in, new SerializationHelper(MessagingService.current_version, SerializationHelper.Flag.LOCAL, h.nowInSec), h.sHeader, writer, markerWriter);
             return partition;
         }
 

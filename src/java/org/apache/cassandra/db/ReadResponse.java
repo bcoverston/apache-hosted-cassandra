@@ -101,12 +101,12 @@ public abstract class ReadResponse
     {
         // The response, serialized in the current messaging version
         private final ByteBuffer data;
-        private final LegacyLayout.Flag flag;
+        private final SerializationHelper.Flag flag;
 
         private DataResponse(ByteBuffer data)
         {
             this.data = data;
-            this.flag = LegacyLayout.Flag.FROM_REMOTE;
+            this.flag = SerializationHelper.Flag.FROM_REMOTE;
         }
 
         private DataResponse(PartitionIterator iter)
@@ -116,7 +116,7 @@ public abstract class ReadResponse
             {
                 PartitionIterators.serializerForIntraNode().serialize(iter, buffer, MessagingService.current_version);
                 this.data = buffer.buffer();
-                this.flag = LegacyLayout.Flag.LOCAL;
+                this.flag = SerializationHelper.Flag.LOCAL;
             }
             catch (IOException e)
             {

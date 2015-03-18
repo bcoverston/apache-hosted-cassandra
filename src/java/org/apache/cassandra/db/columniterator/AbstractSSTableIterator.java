@@ -59,7 +59,7 @@ abstract class AbstractSSTableIterator implements SliceableAtomIterator
         this.sstable = sstable;
         this.key = key;
         this.columns = columns;
-        this.helper = new SerializationHelper(sstable.descriptor.version.correspondingMessagingVersion(), LegacyLayout.Flag.LOCAL, nowInSec);
+        this.helper = new SerializationHelper(sstable.descriptor.version.correspondingMessagingVersion(), SerializationHelper.Flag.LOCAL, nowInSec);
 
         if (indexEntry == null)
         {
