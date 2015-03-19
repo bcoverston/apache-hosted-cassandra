@@ -786,7 +786,7 @@ public class LegacySchemaTables
                                  .clustering(table.cfName);
 
         adder.add("cf_id", table.cfId);
-        adder.add("type", table.cfType.toString());
+        adder.add("type", table.isSuper() ? "Super" : "Standard");
 
         if (table.isSuper())
         {
@@ -808,7 +808,6 @@ public class LegacySchemaTables
         adder.add("compaction_strategy_options", json(table.compactionStrategyOptions));
         adder.add("compression_parameters", json(table.compressionParameters.asThriftOptions()));
         adder.add("default_time_to_live", table.getDefaultTimeToLive());
-        adder.add("default_validator", table.getDefaultValidator().toString());
         adder.add("gc_grace_seconds", table.getGcGraceSeconds());
         adder.add("key_validator", table.getKeyValidator().toString());
         adder.add("local_read_repair_chance", table.getDcLocalReadRepairChance());
@@ -829,7 +828,9 @@ public class LegacySchemaTables
                 adder.addMapEntry("dropped_columns_types", name, column.type.toString());
         }
 
-        adder.add("is_dense", table.layout().isDense());
+        adder.add("is_dense", table.isDense());
+
+        adder.add("default_validator", table.makeLegacyDefaultValidator().toString());
 
         if (withColumnsAndTriggers)
         {
@@ -984,28 +985,33 @@ public class LegacySchemaTables
 
         AbstractType<?> rawComparator = TypeParser.parse(result.getString("comparator"));
         AbstractType<?> subComparator = result.has("subcomparator") ? TypeParser.parse(result.getString("subcomparator")) : null;
-        ColumnFamilyType cfType = ColumnFamilyType.valueOf(result.getString("type"));
 
-        List<ColumnDefinition> columnDefs = createColumnsFromColumnRows(serializedColumnDefinitions,
-                                                                        ksName,
-                                                                        cfName,
-                                                                        rawComparator,
-                                                                        subComparator,
-                                                                        cfType == ColumnFamilyType.Super);
+        boolean isSuper = result.getString("type").toLowerCase().equals("super");
+        boolean isDense = result.getBoolean("is_dense");
+        boolean isCompound = rawComparator instanceof CompositeType;
+
+        // We don't really use the default validator but as we have it for backward compatibility, we use it to know if it's a counter table
+        boolean isCounter = TypeParser.parse(result.getString("default_validator")) instanceof CounterColumnType;
 
         // if we are upgrading, we use id generated from names initially
         UUID cfId = result.has("cf_id")
                   ? result.getUUID("cf_id")
                   : CFMetaData.generateLegacyCfId(ksName, cfName);
 
-        ClusteringComparator cc = CFMetaData.makeComparator(rawComparator, subComparator, result.getBoolean("is_dense"));
-        CFMetaData cfm = new CFMetaData(ksName, cfName, cfType, cc, cfId);
+        List<ColumnDefinition> columnDefs = createColumnsFromColumnRows(serializedColumnDefinitions,
+                                                                        ksName,
+                                                                        cfName,
+                                                                        rawComparator,
+                                                                        subComparator,
+                                                                        isSuper,
+                                                                        isDense);
+
+        CFMetaData cfm = CFMetaData.create(ksName, cfName, cfId, isDense, isCompound, isSuper, isCounter, columnDefs);
+        cfm.columnNameComparator = isDense ? UTF8Type.instance : getColumnNameComparator(rawComparator, columnDefs);
 
         cfm.readRepairChance(result.getDouble("read_repair_chance"));
         cfm.dcLocalReadRepairChance(result.getDouble("local_read_repair_chance"));
         cfm.gcGraceSeconds(result.getInt("gc_grace_seconds"));
-        cfm.defaultValidator(TypeParser.parse(result.getString("default_validator")));
-        cfm.keyValidator(TypeParser.parse(result.getString("key_validator")));
         cfm.minCompactionThreshold(result.getInt("min_compaction_threshold"));
         cfm.maxCompactionThreshold(result.getInt("max_compaction_threshold"));
         if (result.has("comment"))
@@ -1040,10 +1046,17 @@ public class LegacySchemaTables
             addDroppedColumns(cfm, result.getMap("dropped_columns", UTF8Type.instance, LongType.instance), types);
         }
 
-        for (ColumnDefinition cd : columnDefs)
-            cfm.addOrReplaceColumnDefinition(cd);
+        return cfm;
+    }
 
-        return cfm.rebuild();
+    private static AbstractType<?> getColumnNameComparator(AbstractType<?> rawComparator, List<ColumnDefinition> defs)
+    {
+        for (ColumnDefinition def : defs)
+        {
+            if (def.isRegular())
+                return getComponentComparator(rawComparator, def.isOnAllComponents() ? null : def.position());
+        }
+        return UTF8Type.instance;
     }
 
     private static void addDroppedColumns(CFMetaData cfm, Map<String, Long> droppedTimes, Map<String, String> types)
@@ -1067,7 +1080,7 @@ public class LegacySchemaTables
                                  .clustering(table.cfName, column.name.toString());
 
         adder.add("validator", column.type.toString());
-        adder.add("type", serializeKind(column.kind));
+        adder.add("type", serializeKind(column.kind, table.isDense()));
         adder.add("component_index", column.isOnAllComponents() ? null : column.position());
         adder.add("index_name", column.getIndexName());
         adder.add("index_type", column.getIndexType() == null ? null : column.getIndexType().toString());
@@ -1076,16 +1089,24 @@ public class LegacySchemaTables
         adder.build();
     }
 
-    private static String serializeKind(ColumnDefinition.Kind kind)
+    private static String serializeKind(ColumnDefinition.Kind kind, boolean isDense)
     {
-        // For backward compatibility we need to special case CLUSTERING_COLUMN
-        return kind == ColumnDefinition.Kind.CLUSTERING_COLUMN ? "clustering_key" : kind.toString().toLowerCase();
+        // For backward compatibility, we special case CLUSTERING_COLUMN and the case where the table is dense.
+        if (kind == ColumnDefinition.Kind.CLUSTERING_COLUMN)
+            return "clustering_key";
+
+        if (kind == ColumnDefinition.Kind.REGULAR && isDense)
+            return "compact_value";
+
+        return kind.toString().toLowerCase();
     }
 
     private static ColumnDefinition.Kind deserializeKind(String kind)
     {
         if (kind.equalsIgnoreCase("clustering_key"))
             return ColumnDefinition.Kind.CLUSTERING_COLUMN;
+        if (kind.equalsIgnoreCase("compact_value"))
+            return ColumnDefinition.Kind.REGULAR;
         return Enum.valueOf(ColumnDefinition.Kind.class, kind.toUpperCase());
     }
 
@@ -1100,11 +1121,12 @@ public class LegacySchemaTables
                                                                       String table,
                                                                       AbstractType<?> rawComparator,
                                                                       AbstractType<?> rawSubComparator,
-                                                                      boolean isSuper)
+                                                                      boolean isSuper,
+                                                                      boolean isDense)
     {
         List<ColumnDefinition> columns = new ArrayList<>();
         for (UntypedResultSet.Row row : rows)
-            columns.add(createColumnFromColumnRow(row, keyspace, table, rawComparator, rawSubComparator, isSuper));
+            columns.add(createColumnFromColumnRow(row, keyspace, table, rawComparator, rawSubComparator, isSuper, isDense));
         return columns;
     }
 
@@ -1113,7 +1135,8 @@ public class LegacySchemaTables
                                                               String table,
                                                               AbstractType<?> rawComparator,
                                                               AbstractType<?> rawSubComparator,
-                                                              boolean isSuper)
+                                                              boolean isSuper,
+                                                              boolean isDense)
     {
         ColumnDefinition.Kind kind = deserializeKind(row.getString("type"));
 
@@ -1125,7 +1148,7 @@ public class LegacySchemaTables
 
         // Note: we save the column name as string, but we should not assume that it is an UTF8 name, we
         // we need to use the comparator fromString method
-        AbstractType<?> comparator = isSuper ? rawSubComparator : (kind == ColumnDefinition.Kind.REGULAR
+        AbstractType<?> comparator = isSuper ? rawSubComparator : (!isDense && kind == ColumnDefinition.Kind.REGULAR
                                                                    ? getComponentComparator(rawComparator, componentIndex)
                                                                    : UTF8Type.instance);
         ColumnIdentifier name = new ColumnIdentifier(comparator.fromString(row.getString("column_name")), comparator);

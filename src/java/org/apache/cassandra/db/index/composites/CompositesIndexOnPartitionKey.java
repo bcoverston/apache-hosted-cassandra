@@ -49,16 +49,6 @@ import org.apache.cassandra.utils.concurrent.OpOrder;
  */
 public class CompositesIndexOnPartitionKey extends CompositesIndex
 {
-    public static ClusteringComparator buildIndexComparator(CFMetaData baseMetadata, ColumnDefinition columnDef)
-    {
-        int ckCount = baseMetadata.clusteringColumns().size();
-        List<AbstractType<?>> types = new ArrayList<AbstractType<?>>(ckCount + 1);
-        types.add(SecondaryIndex.keyComparator);
-        for (int i = 0; i < ckCount; i++)
-            types.add(baseMetadata.comparator.subtype(i));
-        return new ClusteringComparator(types, true, true);
-    }
-
     protected ByteBuffer getIndexedValue(ByteBuffer rowKey, Clustering clustering, ByteBuffer cellValue, CellPath path)
     {
         CompositeType keyComparator = (CompositeType)baseCfs.metadata.getKeyValidator();

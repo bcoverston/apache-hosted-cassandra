@@ -45,16 +45,6 @@ import org.apache.cassandra.db.marshal.*;
  */
 public abstract class CompositesIndexIncludingCollectionKey extends CompositesIndex
 {
-    public static ClusteringComparator buildIndexComparator(CFMetaData baseMetadata, ColumnDefinition columnDef)
-    {
-        int count = 1 + baseMetadata.clusteringColumns().size(); // row key + clustering prefix
-        List<AbstractType<?>> types = new ArrayList<AbstractType<?>>(count);
-        types.add(SecondaryIndex.keyComparator);
-        for (int i = 0; i < count - 1; i++)
-            types.add(baseMetadata.comparator.subtype(i));
-        return new ClusteringComparator(types, true, true);
-    }
-
     protected CBuilder buildIndexClusteringPrefix(ByteBuffer rowKey, ClusteringPrefix prefix, Cell cell)
     {
         CBuilder builder = CBuilder.create(getIndexComparator());

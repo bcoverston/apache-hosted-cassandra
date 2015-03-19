@@ -510,8 +510,8 @@ public final class StatementRestrictions
     {
         // Due to CASSANDRA-5762, we always do a slice for CQL3 tables (not dense, composite).
         // Static CF (non dense but non composite) never entails a column slice however
-        if (!cfm.layout().isDense())
-            return cfm.layout().isCompound();
+        if (!cfm.isDense())
+            return cfm.isCompound();
 
         // Otherwise (i.e. for compact table where we don't have a row marker anyway and thus don't care about
         // CASSANDRA-5762),

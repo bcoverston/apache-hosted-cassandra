@@ -389,6 +389,28 @@ public class Columns implements Iterable<ColumnDefinition>
         };
     }
 
+    /**
+     * Returns the equivalent of those columns but with the provided column removed.
+     *
+     * @param column the column to remove.
+     *
+     * @return newly allocated columns containing all the columns of {@code this} expect
+     * for {@code column}.
+     */
+    public Columns without(ColumnDefinition column)
+    {
+        int idx = column.isComplex() ? complexIdx(column) : simpleIdx(column);
+        if (idx < 0)
+            return this;
+
+        int realIdx = column.isComplex() ? complexIdx + idx : idx;
+
+        ColumnDefinition[] newColumns = new ColumnDefinition[columns.length - 1];
+        System.arraycopy(columns, 0, newColumns, 0, realIdx);
+        System.arraycopy(columns, realIdx + 1, newColumns, realIdx, newColumns.length - realIdx);
+        return new Columns(newColumns);
+    }
+
     public void digest(MessageDigest digest)
     {
         for (ColumnDefinition c : this)

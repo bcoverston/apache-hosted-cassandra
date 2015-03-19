@@ -140,10 +140,10 @@ public final class SingleColumnRelation extends Relation
         ColumnDefinition columnDef = toColumnDefinition(cfm, entity);
         if (mapKey == null)
         {
-            Term term = toTerm(toReceivers(columnDef), value, cfm.ksName, boundNames);
+            Term term = toTerm(toReceivers(columnDef, cfm.isDense()), value, cfm.ksName, boundNames);
             return new SingleColumnRestriction.EQ(columnDef, term);
         }
-        List<? extends ColumnSpecification> receivers = toReceivers(columnDef);
+        List<? extends ColumnSpecification> receivers = toReceivers(columnDef, cfm.isDense());
         Term entryKey = toTerm(Collections.singletonList(receivers.get(0)), mapKey, cfm.ksName, boundNames);
         Term entryValue = toTerm(Collections.singletonList(receivers.get(1)), value, cfm.ksName, boundNames);
         return new SingleColumnRestriction.Contains(columnDef, entryKey, entryValue);
@@ -154,7 +154,7 @@ public final class SingleColumnRelation extends Relation
                                            VariableSpecifications boundNames) throws InvalidRequestException
     {
         ColumnDefinition columnDef = cfm.getColumnDefinition(getEntity().prepare(cfm));
-        List<? extends ColumnSpecification> receivers = toReceivers(columnDef);
+        List<? extends ColumnSpecification> receivers = toReceivers(columnDef, cfm.isDense());
         List<Term> terms = toTerms(receivers, inValues, cfm.ksName, boundNames);
         if (terms == null)
         {
@@ -171,7 +171,7 @@ public final class SingleColumnRelation extends Relation
                                               boolean inclusive) throws InvalidRequestException
     {
         ColumnDefinition columnDef = toColumnDefinition(cfm, entity);
-        Term term = toTerm(toReceivers(columnDef), value, cfm.ksName, boundNames);
+        Term term = toTerm(toReceivers(columnDef, cfm.isDense()), value, cfm.ksName, boundNames);
         return new SingleColumnRestriction.SliceRestriction(columnDef, bound, inclusive, term);
     }
 
@@ -181,22 +181,23 @@ public final class SingleColumnRelation extends Relation
                                                  boolean isKey) throws InvalidRequestException
     {
         ColumnDefinition columnDef = toColumnDefinition(cfm, entity);
-        Term term = toTerm(toReceivers(columnDef), value, cfm.ksName, boundNames);
+        Term term = toTerm(toReceivers(columnDef, cfm.isDense()), value, cfm.ksName, boundNames);
         return new SingleColumnRestriction.Contains(columnDef, term, isKey);
     }
 
     /**
      * Returns the receivers for this relation.
      * @param columnDef the column definition
+     * @param isDense whether the table is a dense one
      *
      * @return the receivers for the specified relation.
      * @throws InvalidRequestException if the relation is invalid
      */
-    private List<? extends ColumnSpecification> toReceivers(ColumnDefinition columnDef) throws InvalidRequestException
+    private List<? extends ColumnSpecification> toReceivers(ColumnDefinition columnDef, boolean isDense) throws InvalidRequestException
     {
         ColumnSpecification receiver = columnDef;
 
-        checkFalse(columnDef.isCompactValue(),
+        checkFalse(!columnDef.isPrimaryKeyColumn() && isDense,
                    "Predicates on the non-primary-key column (%s) of a COMPACT table are not yet supported",
                    columnDef.name);
 

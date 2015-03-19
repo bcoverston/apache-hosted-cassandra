@@ -512,7 +512,6 @@ public class SelectStatement implements CQLStatement
                         case CLUSTERING_COLUMN:
                             result.add(row.clustering().get(def.position()));
                             break;
-                        case COMPACT_VALUE:
                         case REGULAR:
                             addValue(result, def, row, options);
                             break;

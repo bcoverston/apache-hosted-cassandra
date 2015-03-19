@@ -163,7 +163,6 @@ public abstract class CBuilder
             built = true;
 
             // Currently, only dense table can leave some clustering column out (see #7990)
-            assert size == type.size() || type.isDense;
             return size == 0 ? Clustering.EMPTY : new SimpleClustering(values);
         }
 

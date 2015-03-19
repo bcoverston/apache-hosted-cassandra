@@ -60,7 +60,7 @@ public class AtomicBTreePartition implements Partition
 {
     private static final Logger logger = LoggerFactory.getLogger(AtomicBTreePartition.class);
 
-    public static final long EMPTY_SIZE = ObjectSizes.measure(new AtomicBTreePartition((CFMetaData.denseCFMetaData("keyspace", "table", BytesType.instance)),
+    public static final long EMPTY_SIZE = ObjectSizes.measure(new AtomicBTreePartition(CFMetaData.createFake("keyspace", "table"),
                                                                                        StorageService.getPartitioner().decorateKey(ByteBuffer.allocate(1)),
                                                                                        null));
 

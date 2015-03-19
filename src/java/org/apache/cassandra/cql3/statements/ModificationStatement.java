@@ -432,7 +432,7 @@ public abstract class ModificationStatement implements CQLStatement
             if (r == null)
             {
                 firstEmptyKey = def;
-                checkFalse(requireFullClusteringKey() && !cfm.layout().isDense() && cfm.layout().isCompound(),
+                checkFalse(requireFullClusteringKey() && !cfm.isDense() && cfm.isCompound(),
                            "Missing mandatory PRIMARY KEY part %s", def.name);
             }
             else if (firstEmptyKey != null)

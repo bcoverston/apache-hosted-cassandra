@@ -32,6 +32,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.config.IndexType;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.atoms.*;
@@ -372,23 +373,21 @@ public abstract class SecondaryIndex
     }
 
     /**
-     * Returns the index comparator for index backed by CFS, or null.
-     *
-     * Note: it would be cleaner to have this be a member method. However we need this when opening indexes
-     * sstables, but by then the CFS won't be fully initiated, so the SecondaryIndex object won't be accessible.
+     * Create the index metadata for the index on a given column of a given table.
      */
-    public static ClusteringComparator getIndexComparator(CFMetaData baseMetadata, ColumnDefinition cdef)
+    public static CFMetaData newIndexMetadata(CFMetaData baseMetadata, ColumnDefinition def)
     {
-        switch (cdef.getIndexType())
-        {
-            case KEYS:
-                return new ClusteringComparator(Collections.<AbstractType<?>>singletonList(keyComparator), true, false);
-            case COMPOSITES:
-                return CompositesIndex.getIndexComparator(baseMetadata, cdef);
-            case CUSTOM:
-                return null;
-        }
-        throw new AssertionError();
+        if (def.getIndexType() == IndexType.CUSTOM)
+            return null;
+
+        CFMetaData.Builder builder = CFMetaData.Builder.create(baseMetadata.ksName, baseMetadata.indexColumnFamilyName(def))
+                                                       .withId(baseMetadata.cfId)
+                                                       .addPartitionKey(def.name, def.type);
+
+        if (def.getIndexType() == IndexType.COMPOSITES)
+            CompositesIndex.addIndexClusteringColumns(builder, baseMetadata, def);
+
+        return builder.build().reloadIndexMetadataProperties(baseMetadata);
     }
 
     @Override

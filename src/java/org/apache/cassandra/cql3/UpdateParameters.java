@@ -90,7 +90,7 @@ public class UpdateParameters
         if (indexManager != null)
             indexManager.validate(clustering);
 
-        if (metadata.layout().isDense() && !metadata.layout().isCompound())
+        if (metadata.isDense() && !metadata.isCompound())
         {
             // If it's a COMPACT STORAGE table with a single clustering column, the clustering value is
             // translated in Thrift to the full Thrift column name, and for backward compatibility we

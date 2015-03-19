@@ -49,18 +49,21 @@ import org.apache.cassandra.utils.concurrent.OpOrder;
  */
 public class CompositesIndexOnClusteringKey extends CompositesIndex
 {
-    public static ClusteringComparator buildIndexComparator(CFMetaData baseMetadata, ColumnDefinition columnDef)
+    public static void addClusteringColumns(CFMetaData.Builder indexMetadata, CFMetaData baseMetadata, ColumnDefinition columnDef)
     {
-        // Index cell names are rk ck_0 ... ck_{i-1} ck_{i+1} ck_n, so n
-        // components total (where n is the number of clustering keys)
-        int ckCount = baseMetadata.clusteringColumns().size();
-        List<AbstractType<?>> types = new ArrayList<AbstractType<?>>(ckCount);
-        types.add(SecondaryIndex.keyComparator);
+        indexMetadata.addClusteringColumn("partition_key", SecondaryIndex.keyComparator);
+
+        List<ColumnDefinition> cks = baseMetadata.clusteringColumns();
         for (int i = 0; i < columnDef.position(); i++)
-            types.add(baseMetadata.clusteringColumns().get(i).type);
-        for (int i = columnDef.position() + 1; i < ckCount; i++)
-            types.add(baseMetadata.clusteringColumns().get(i).type);
-        return new ClusteringComparator(types, true, true);
+        {
+            ColumnDefinition def = cks.get(i);
+            indexMetadata.addClusteringColumn(def.name, def.type);
+        }
+        for (int i = columnDef.position() + 1; i < cks.size(); i++)
+        {
+            ColumnDefinition def = cks.get(i);
+            indexMetadata.addClusteringColumn(def.name, def.type);
+        }
     }
 
     protected ByteBuffer getIndexedValue(ByteBuffer rowKey, Clustering clustering, ByteBuffer cellValue, CellPath path)

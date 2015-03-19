@@ -92,12 +92,12 @@ public class AlterTableStatement extends SchemaAlteringStatement
         {
             case ADD:
                 assert columnName != null;
-                if (cfm.layout().isDense())
+                if (cfm.isDense())
                     throw new InvalidRequestException("Cannot add new column to a COMPACT STORAGE table");
 
                 if (isStatic)
                 {
-                    if (!cfm.layout().isCompound())
+                    if (!cfm.isCompound())
                         throw new InvalidRequestException("Static columns are not allowed in COMPACT STORAGE tables");
                     if (cfm.clusteringColumns().isEmpty())
                         throw new InvalidRequestException("Static columns are only useful (and thus allowed) if the table has at least one clustering column");
@@ -122,7 +122,7 @@ public class AlterTableStatement extends SchemaAlteringStatement
                 AbstractType<?> type = validator.getType();
                 if (type.isCollection() && type.isMultiCell())
                 {
-                    if (!cfm.layout().isCompound())
+                    if (!cfm.isCompound())
                         throw new InvalidRequestException("Cannot use non-frozen collections in COMPACT STORAGE tables");
                     if (cfm.isSuper())
                         throw new InvalidRequestException("Cannot use non-frozen collections with super column families");
@@ -138,7 +138,7 @@ public class AlterTableStatement extends SchemaAlteringStatement
                                     columnName, dropped.type == null ? "" : " (" + dropped.type.asCQL3Type() + ")"));
                 }
 
-                Integer componentIndex = cfm.layout().isCompound() ? cfm.comparator.size() : null;
+                Integer componentIndex = cfm.isCompound() ? cfm.comparator.size() : null;
                 cfm.addColumnDefinition(isStatic
                                         ? ColumnDefinition.staticDef(cfm, columnName.bytes, type, componentIndex)
                                         : ColumnDefinition.regularDef(cfm, columnName.bytes, type, componentIndex));
@@ -155,28 +155,13 @@ public class AlterTableStatement extends SchemaAlteringStatement
                     case PARTITION_KEY:
                         if (validatorType instanceof CounterColumnType)
                             throw new InvalidRequestException(String.format("counter type is not supported for PRIMARY KEY part %s", columnName));
-                        if (cfm.getKeyValidator() instanceof CompositeType)
-                        {
-                            List<AbstractType<?>> oldTypes = ((CompositeType) cfm.getKeyValidator()).types;
-                            if (!validatorType.isValueCompatibleWith(oldTypes.get(def.position())))
-                                throw new ConfigurationException(String.format("Cannot change %s from type %s to type %s: types are incompatible.",
-                                                                               columnName,
-                                                                               oldTypes.get(def.position()).asCQL3Type(),
-                                                                               validator));
 
-                            List<AbstractType<?>> newTypes = new ArrayList<AbstractType<?>>(oldTypes);
-                            newTypes.set(def.position(), validatorType);
-                            cfm.keyValidator(CompositeType.getInstance(newTypes));
-                        }
-                        else
-                        {
-                            if (!validatorType.isValueCompatibleWith(cfm.getKeyValidator()))
-                                throw new ConfigurationException(String.format("Cannot change %s from type %s to type %s: types are incompatible.",
-                                                                               columnName,
-                                                                               cfm.getKeyValidator().asCQL3Type(),
-                                                                               validator));
-                            cfm.keyValidator(validatorType);
-                        }
+                        AbstractType<?> currentType = cfm.getKeyValidatorAsClusteringComparator().subtype(def.position());
+                        if (!validatorType.isValueCompatibleWith(currentType))
+                            throw new ConfigurationException(String.format("Cannot change %s from type %s to type %s: types are incompatible.",
+                                                                           columnName,
+                                                                           currentType.asCQL3Type(),
+                                                                           validator));
                         break;
                     case CLUSTERING_COLUMN:
                         AbstractType<?> oldType = cfm.comparator.subtype(def.position());
@@ -189,16 +174,6 @@ public class AlterTableStatement extends SchemaAlteringStatement
                                                                            oldType.asCQL3Type(),
                                                                            validator));
 
-                        cfm.comparator = cfm.comparator.setSubtype(def.position(), validatorType);
-                        break;
-                    case COMPACT_VALUE:
-                        // See below
-                        if (!validatorType.isValueCompatibleWith(cfm.getDefaultValidator()))
-                            throw new ConfigurationException(String.format("Cannot change %s from type %s to type %s: types are incompatible.",
-                                                                           columnName,
-                                                                           cfm.getDefaultValidator().asCQL3Type(),
-                                                                           validator));
-                        cfm.defaultValidator(validatorType);
                         break;
                     case REGULAR:
                     case STATIC:

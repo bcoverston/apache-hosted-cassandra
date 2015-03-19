@@ -75,7 +75,7 @@ public class UpdateStatement extends ModificationStatement
             // For a dense layout, when we translate it to thrift, we don't have a row marker. So we don't accept an insert/update
             // that only sets the PK unless the is no declared non-PK columns (which means that the table definition only includes
             // the PK in the first place)
-            if (updates.isEmpty() && cfm.layout().isDense() && !cfm.partitionColumns().isEmpty())
+            if (updates.isEmpty() && cfm.isDense() && !cfm.partitionColumns().isEmpty())
                 throw new InvalidRequestException(String.format("Column %s is mandatory for this COMPACT STORAGE table", cfm.compactValueColumn().name));
 
             for (Operation op : updates)

@@ -41,18 +41,10 @@ import org.apache.cassandra.exceptions.ConfigurationException;
  */
 public abstract class CompositesIndex extends AbstractSimplePerColumnSecondaryIndex
 {
-    private volatile ClusteringComparator indexComparator;
-
     protected ClusteringComparator getIndexComparator()
     {
-        // Yes, this is racy, but doing this more than once is not a big deal, we just want to avoid doing it every time
-        // More seriously, we should fix that whole SecondaryIndex API so this can be a final and avoid all that non-sense.
-        if (indexComparator == null)
-        {
-            assert columnDef != null;
-            indexComparator = getIndexComparator(baseCfs.metadata, columnDef);
-        }
-        return indexComparator;
+        assert indexCfs != null;
+        return indexCfs.metadata.comparator;
     }
 
     public static CompositesIndex create(ColumnDefinition cfDef)
@@ -89,39 +81,36 @@ public abstract class CompositesIndex extends AbstractSimplePerColumnSecondaryIn
         throw new AssertionError();
     }
 
-    // Check SecondaryIndex.getIndexComparator if you want to know why this is static
-    public static ClusteringComparator getIndexComparator(CFMetaData baseMetadata, ColumnDefinition cfDef)
+    public static void addIndexClusteringColumns(CFMetaData.Builder indexMetadata, CFMetaData baseMetadata, ColumnDefinition cfDef)
     {
         if (cfDef.type.isCollection() && cfDef.type.isMultiCell())
         {
-            switch (((CollectionType)cfDef.type).kind)
+            CollectionType type = (CollectionType)cfDef.type;
+            if (type.kind == CollectionType.Kind.LIST
+                || (type.kind == CollectionType.Kind.MAP && cfDef.hasIndexOption(SecondaryIndex.INDEX_VALUES_OPTION_NAME)))
             {
-                case LIST:
-                    return CompositesIndexOnCollectionValue.buildIndexComparator(baseMetadata, cfDef);
-                case SET:
-                    return CompositesIndexOnCollectionKey.buildIndexComparator(baseMetadata, cfDef);
-                case MAP:
-                    if (cfDef.hasIndexOption(SecondaryIndex.INDEX_KEYS_OPTION_NAME))
-                        return CompositesIndexOnCollectionKey.buildIndexComparator(baseMetadata, cfDef);
-                    else if (cfDef.hasIndexOption(SecondaryIndex.INDEX_ENTRIES_OPTION_NAME))
-                        return CompositesIndexOnCollectionKeyAndValue.buildIndexComparator(baseMetadata, cfDef);
-                    else
-                        return CompositesIndexOnCollectionValue.buildIndexComparator(baseMetadata, cfDef);
+                CompositesIndexOnCollectionValue.addClusteringColumns(indexMetadata, baseMetadata, cfDef);
+            }
+            else
+            {
+                addGenericClusteringColumns(indexMetadata, baseMetadata, cfDef);
             }
         }
-
-        switch (cfDef.kind)
+        else if (cfDef.isClusteringColumn())
         {
-            case CLUSTERING_COLUMN:
-                return CompositesIndexOnClusteringKey.buildIndexComparator(baseMetadata, cfDef);
-            case REGULAR:
-                return CompositesIndexOnRegular.buildIndexComparator(baseMetadata, cfDef);
-            case PARTITION_KEY:
-                return CompositesIndexOnPartitionKey.buildIndexComparator(baseMetadata, cfDef);
-            //case COMPACT_VALUE:
-            //    return CompositesIndexOnCompactValue.buildIndexComparator(baseMetadata, cfDef);
+            CompositesIndexOnClusteringKey.addClusteringColumns(indexMetadata, baseMetadata, cfDef);
         }
-        throw new AssertionError();
+        else
+        {
+            addGenericClusteringColumns(indexMetadata, baseMetadata, cfDef);
+        }
+    }
+
+    private static void addGenericClusteringColumns(CFMetaData.Builder indexMetadata, CFMetaData baseMetadata, ColumnDefinition columnDef)
+    {
+        indexMetadata.addClusteringColumn("partition_key", SecondaryIndex.keyComparator);
+        for (ColumnDefinition def : baseMetadata.clusteringColumns())
+            indexMetadata.addClusteringColumn(def.name, def.type);
     }
 
     protected Clustering makeIndexClustering(ByteBuffer rowKey, Clustering clustering, Cell cell)

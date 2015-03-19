@@ -321,8 +321,7 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
             String parentName = descriptor.cfname.substring(0, i);
             CFMetaData parent = Schema.instance.getCFMetaData(descriptor.ksname, parentName);
             ColumnDefinition def = parent.getColumnDefinitionForIndex(descriptor.cfname.substring(i + 1));
-            ClusteringComparator cc = SecondaryIndex.getIndexComparator(parent, def);
-            metadata = CFMetaData.newIndexMetadata(parent, def, cc);
+            metadata = SecondaryIndex.newIndexMetadata(parent, def);
         }
         else
         {

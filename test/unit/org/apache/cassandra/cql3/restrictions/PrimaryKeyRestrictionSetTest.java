@@ -914,18 +914,13 @@ public class PrimaryKeyRestrictionSetTest
         for (int i = 0; i < numberOfClusteringColumns; i++)
             types.add(Int32Type.instance);
 
-        ClusteringComparator comparator = new ClusteringComparator(types, false, true);
-        CFMetaData cfMetaData = new CFMetaData("keyspace", "test", ColumnFamilyType.Standard, comparator);
-
-        cfMetaData.addColumnDefinition(ColumnDefinition.partitionKeyDef("keyspace", "test", "partition_key", Int32Type.instance, 0));
+        CFMetaData.Builder builder = CFMetaData.Builder.create("keyspace", "test")
+                                                       .addPartitionKey("partition_key", Int32Type.instance);
 
         for (int i = 0; i < numberOfClusteringColumns; i++)
-        {
-            ColumnDefinition columnDef = ColumnDefinition.clusteringKeyDef("keyspace", "test", "clustering_" + i, Int32Type.instance, i);
-            cfMetaData.addColumnDefinition(columnDef);
-        }
-        cfMetaData.rebuild();
-        return cfMetaData;
+            builder.addClusteringColumn("clustering_" + i, Int32Type.instance);
+
+        return builder.build();
     }
 
     /**

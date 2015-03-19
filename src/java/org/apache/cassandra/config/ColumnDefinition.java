@@ -36,11 +36,9 @@ public class ColumnDefinition extends ColumnSpecification implements Comparable<
 {
     /*
      * The type of CQL3 column this definition represents.
-     * There is 3 main type of CQL3 columns: those parts of the partition key,
-     * those parts of the clustering key and the other, regular ones.
-     * But when COMPACT STORAGE is used, there is by design only one regular
-     * column, whose name is not stored in the data contrarily to the column of
-     * type REGULAR. Hence the COMPACT_VALUE type to distinguish it below.
+     * There is 4 main type of CQL3 columns: those parts of the partition key,
+     * those parts of the clustering key and amongst the others, regular and
+     * static ones.
      *
      * Note that thrift only knows about definitions of type REGULAR (and
      * the ones whose componentIndex == null).
@@ -50,8 +48,7 @@ public class ColumnDefinition extends ColumnSpecification implements Comparable<
         PARTITION_KEY,
         CLUSTERING_COLUMN,
         REGULAR,
-        STATIC,
-        COMPACT_VALUE;
+        STATIC;
 
         public boolean isPrimaryKeyKind()
         {
@@ -100,19 +97,14 @@ public class ColumnDefinition extends ColumnSpecification implements Comparable<
         return new ColumnDefinition(cfm, name, validator, componentIndex, Kind.REGULAR);
     }
 
+    public static ColumnDefinition regularDef(String ksName, String cfName, String name, AbstractType<?> validator, Integer componentIndex)
+    {
+        return new ColumnDefinition(ksName, cfName, new ColumnIdentifier(name, true), validator, null, null, null, componentIndex, Kind.REGULAR);
+    }
+
     public static ColumnDefinition staticDef(CFMetaData cfm, ByteBuffer name, AbstractType<?> validator, Integer componentIndex)
     {
         return new ColumnDefinition(cfm, name, validator, componentIndex, Kind.STATIC);
-    }
-
-    public static ColumnDefinition compactValueDef(CFMetaData cfm, ByteBuffer name, AbstractType<?> validator)
-    {
-        return new ColumnDefinition(cfm, name, validator, null, Kind.COMPACT_VALUE);
-    }
-
-    public static ColumnDefinition compactValueDef(String ksName, String cfName, String name, AbstractType<?> validator)
-    {
-        return new ColumnDefinition(ksName, cfName, new ColumnIdentifier(name, true), validator, null, null, null, null, Kind.COMPACT_VALUE);
     }
 
     public ColumnDefinition(CFMetaData cfm, ByteBuffer name, AbstractType<?> validator, Integer componentIndex, Kind kind)
@@ -126,6 +118,11 @@ public class ColumnDefinition extends ColumnSpecification implements Comparable<
              null,
              componentIndex,
              kind);
+    }
+
+    public ColumnDefinition(String ksName, String cfName, ColumnIdentifier name, AbstractType<?> type, Integer componentIndex, Kind kind)
+    {
+        this(ksName, cfName, name, type, null, null, null, componentIndex, kind);
     }
 
     @VisibleForTesting
@@ -219,11 +216,6 @@ public class ColumnDefinition extends ColumnSpecification implements Comparable<
     public boolean isRegular()
     {
         return kind == Kind.REGULAR;
-    }
-
-    public boolean isCompactValue()
-    {
-        return kind == Kind.COMPACT_VALUE;
     }
 
     // The componentIndex. This never return null however for convenience sake:
@@ -393,6 +385,11 @@ public class ColumnDefinition extends ColumnSpecification implements Comparable<
     {
         if (this == other)
             return 0;
+
+        if (kind != other.kind)
+            return kind.ordinal() < other.kind.ordinal() ? -1 : 1;
+        if (position() != other.position())
+            return position() < other.position() ? -1 : 1;
 
         if (isStatic() != other.isStatic())
             return isStatic() ? -1 : 1;

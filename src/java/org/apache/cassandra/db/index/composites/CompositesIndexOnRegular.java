@@ -47,16 +47,6 @@ import org.apache.cassandra.db.marshal.*;
  */
 public class CompositesIndexOnRegular extends CompositesIndex
 {
-    public static ClusteringComparator buildIndexComparator(CFMetaData baseMetadata, ColumnDefinition columnDef)
-    {
-        int prefixSize = columnDef.position();
-        List<AbstractType<?>> types = new ArrayList<AbstractType<?>>(prefixSize + 1);
-        types.add(SecondaryIndex.keyComparator);
-        for (int i = 0; i < prefixSize; i++)
-            types.add(baseMetadata.comparator.subtype(i));
-        return new ClusteringComparator(types, true, true);
-    }
-
     protected ByteBuffer getIndexedValue(ByteBuffer rowKey, Clustering clustering, ByteBuffer cellValue, CellPath path)
     {
         return cellValue;

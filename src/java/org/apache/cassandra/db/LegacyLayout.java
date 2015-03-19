@@ -62,59 +62,12 @@ public class LegacyLayout
         //this.deletionInfoSerializer = new DeletionInfo.Serializer(this);
     }
 
-    // We call dense a CF for which each component of the comparator is a clustering column, i.e. no
-    // component is used to store a regular column names. In other words, non-composite static "thrift"
-    // and CQL3 CF are *not* dense.
-    public boolean isDense()
-    {
-        return metadata.comparator.isDense;
-    }
-
-    public boolean isCompound()
-    {
-        return metadata.comparator.isCompound;
-    }
-
-    public boolean isCQL3Layout()
-    {
-        return !isDense() && isCompound();
-    }
-
-    public static ClusteringComparator clusteringComparatorFromLegacyComparator(AbstractType<?> type, boolean isDense)
-    {
-        boolean isCompound = type instanceof CompositeType;
-
-        if (!isCompound)
-        {
-            if (isDense)
-                return new ClusteringComparator(Collections.<AbstractType<?>>singletonList(type), true, false);
-            else
-                return new ClusteringComparator(Collections.<AbstractType<?>>emptyList(), false, false);
-        }
-
-        List<AbstractType<?>> types = ((CompositeType)type).types;
-        if (isDense)
-            return new ClusteringComparator(types, true, true);
-
-        boolean hasCollection = types.get(types.size() - 1) instanceof ColumnToCollectionType;
-        int clusteringSize = types.size() - (hasCollection ? 2 : 1);
-        List<AbstractType<?>> clusteringTypes = new ArrayList<>(clusteringSize);
-        clusteringTypes.addAll(types.subList(0, clusteringSize));
-        // Note that we're ignoring:
-        //   - The column name type: for !compound types, we handle it in CFMetadata outside of
-        //     this method (see affectations to columnNameComparator). For compound types, it's
-        //     a CQL3 table and we haven't allowed anything else than UTF8Type which is the default.
-        //   - The ColumnToCollectionType: its informations are redundant with the ColumnDefinition
-        //     of the table.
-        return new ClusteringComparator(clusteringTypes, false, true);
-    }
-
     public AbstractType<?> makeLegacyComparator()
     {
         ClusteringComparator comparator = metadata.comparator;
-        if (!isCompound())
+        if (!metadata.isCompound())
         {
-            if (isDense())
+            if (metadata.isDense())
             {
                 assert comparator.size() == 1;
                 return comparator.subtype(0);
@@ -127,11 +80,11 @@ public class LegacyLayout
         }
 
         boolean hasCollections = metadata.hasCollectionColumns();
-        List<AbstractType<?>> types = new ArrayList<>(comparator.size() + (isDense() ? 0 : 1) + (hasCollections ? 1 : 0));
+        List<AbstractType<?>> types = new ArrayList<>(comparator.size() + (metadata.isDense() ? 0 : 1) + (hasCollections ? 1 : 0));
 
         types.addAll(comparator.subtypes());
 
-        if (!isDense())
+        if (!metadata.isDense())
         {
             types.add(metadata.columnNameComparator);
             if (hasCollections)
@@ -193,10 +146,10 @@ public class LegacyLayout
 
         Clustering clustering = decodeClustering(cellname);
 
-        if (isDense())
+        if (metadata.isDense())
             return Pair.create(clustering, metadata.compactValueColumn());
 
-        ByteBuffer column = isCompound() ? CompositeType.extractComponent(cellname, metadata.comparator.size()) : cellname;
+        ByteBuffer column = metadata.isCompound() ? CompositeType.extractComponent(cellname, metadata.comparator.size()) : cellname;
         if (column == null)
                 return Pair.create(clustering, null);
 
@@ -209,7 +162,7 @@ public class LegacyLayout
 
     public Clustering decodeClustering(ByteBuffer value)
     {
-        List<ByteBuffer> components = isCompound()
+        List<ByteBuffer> components = metadata.isCompound()
                                     ? CompositeType.splitName(value)
                                     : Collections.singletonList(value);
 

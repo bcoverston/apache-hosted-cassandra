@@ -41,19 +41,14 @@ public class ClusteringComparator implements Comparator<Clusterable>
     private final List<AbstractType<?>> clusteringTypes;
     private final boolean isByteOrderComparable;
 
-    public final boolean isDense;
-    public final boolean isCompound;
-
     private final Comparator<IndexInfo> indexComparator;
     private final Comparator<IndexInfo> indexReverseComparator;
     private final Comparator<Clusterable> reverseComparator;
 
-    public ClusteringComparator(List<AbstractType<?>> clusteringTypes, boolean isDense, boolean isCompound)
+    public ClusteringComparator(List<AbstractType<?>> clusteringTypes)
     {
         this.clusteringTypes = clusteringTypes;
         this.isByteOrderComparable = isByteOrderComparable(clusteringTypes);
-        this.isDense = isDense;
-        this.isCompound = isCompound;
 
         this.indexComparator = new Comparator<IndexInfo>()
         {
@@ -138,20 +133,6 @@ public class ClusteringComparator implements Comparator<Clusterable>
                 builder.add(val);
         }
         return builder.build();
-    }
-
-    /**
-     * Sets the type for a given clustering column in this comparator.
-     *
-     * @param idx the index of the column to set the type for.
-     * @param type the type to set for column {@code idx}.
-     *
-     * @return this comparator (where subtype {@code idx} has been set to {@code type}).
-     */
-    public ClusteringComparator setSubtype(int idx, AbstractType<?> type)
-    {
-        clusteringTypes.set(idx, type);
-        return this;
     }
 
     public int compare(Clusterable c1, Clusterable c2)

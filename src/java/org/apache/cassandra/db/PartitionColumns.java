@@ -47,6 +47,12 @@ public class PartitionColumns implements Iterable<ColumnDefinition>
                                     column.isStatic() ? Columns.NONE : Columns.of(column));
     }
 
+    public PartitionColumns without(ColumnDefinition column)
+    {
+        return new PartitionColumns(column.isStatic() ? statics.without(column) : statics,
+                                    column.isStatic() ? regulars : regulars.without(column));
+    }
+
     public boolean isEmpty()
     {
         return statics.isEmpty() && regulars.isEmpty();
@@ -80,6 +86,23 @@ public class PartitionColumns implements Iterable<ColumnDefinition>
         return sb.toString();
     }
 
+    @Override
+    public boolean equals(Object other)
+    {
+        if (!(other instanceof PartitionColumns))
+            return false;
+
+        PartitionColumns that = (PartitionColumns)other;
+        return this.statics.equals(that.statics)
+            && this.regulars.equals(that.regulars);
+    }
+
+    @Override
+    public int hashCode()
+    {
+        return Objects.hash(statics, regulars);
+    }
+
     public void digest(MessageDigest digest)
     {
         regulars.digest(digest);
@@ -93,21 +116,24 @@ public class PartitionColumns implements Iterable<ColumnDefinition>
 
     public static class Builder
     {
-        private Set<ColumnDefinition> regularColumns;
-        private Set<ColumnDefinition> staticColumns;
+        // Note that we do want to use sorted sets because we want the column definitions to be compared
+        // through compareTo, not equals. The former basically check it's the same column name, while the latter
+        // check it's the same object, including the same type.
+        private SortedSet<ColumnDefinition> regularColumns;
+        private SortedSet<ColumnDefinition> staticColumns;
 
         public Builder add(ColumnDefinition c)
         {
             if (c.isStatic())
             {
                 if (staticColumns == null)
-                    staticColumns = new HashSet<>();
+                    staticColumns = new TreeSet<>();
                 staticColumns.add(c);
             }
             else
             {
                 if (regularColumns == null)
-                    regularColumns = new HashSet<>();
+                    regularColumns = new TreeSet<>();
                 regularColumns.add(c);
             }
             return this;
@@ -129,13 +155,13 @@ public class PartitionColumns implements Iterable<ColumnDefinition>
         public Builder addAll(PartitionColumns columns)
         {
             if (regularColumns == null && !columns.regulars.isEmpty())
-                regularColumns = new HashSet<>();
+                regularColumns = new TreeSet<>();
 
             for (ColumnDefinition c : columns.regulars)
                 regularColumns.add(c);
 
             if (staticColumns == null && !columns.statics.isEmpty())
-                staticColumns = new HashSet<>();
+                staticColumns = new TreeSet<>();
 
             for (ColumnDefinition c : columns.statics)
                 staticColumns.add(c);

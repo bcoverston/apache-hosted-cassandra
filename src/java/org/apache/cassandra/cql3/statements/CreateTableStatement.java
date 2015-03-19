@@ -42,16 +42,16 @@ public class CreateTableStatement extends SchemaAlteringStatement
 {
     private List<AbstractType<?>> keyTypes;
     private List<AbstractType<?>> clusteringTypes;
-    private AbstractType<?> defaultValidator;
 
     private Map<ByteBuffer, CollectionType> collections = new HashMap<>();
 
-    private final List<ByteBuffer> keyAliases = new ArrayList<ByteBuffer>();
-    private final List<ByteBuffer> columnAliases = new ArrayList<ByteBuffer>();
+    private final List<ColumnIdentifier> keyAliases = new ArrayList<>();
+    private final List<ColumnIdentifier> columnAliases = new ArrayList<>();
     private ByteBuffer valueAlias;
 
     private boolean isDense;
     private boolean isCompound;
+    private boolean hasCounters;
 
     private final Map<ColumnIdentifier, AbstractType> columns = new HashMap<ColumnIdentifier, AbstractType>();
     private final Set<ColumnIdentifier> staticColumns;
@@ -81,21 +81,6 @@ public class CreateTableStatement extends SchemaAlteringStatement
     public void validate(ClientState state)
     {
         // validated in announceMigration()
-    }
-
-    // Column definitions
-    private List<ColumnDefinition> getColumns(CFMetaData cfm)
-    {
-        List<ColumnDefinition> columnDefs = new ArrayList<>(columns.size());
-        Integer componentIndex = isCompound ? clusteringTypes.size() : null;
-        for (Map.Entry<ColumnIdentifier, AbstractType> col : columns.entrySet())
-        {
-            ColumnIdentifier id = col.getKey();
-            columnDefs.add(staticColumns.contains(id)
-                           ? ColumnDefinition.staticDef(cfm, col.getKey().bytes, col.getValue(), componentIndex)
-                           : ColumnDefinition.regularDef(cfm, col.getKey().bytes, col.getValue(), componentIndex));
-        }
-        return columnDefs;
     }
 
     public boolean announceMigration(boolean isLocalOnly) throws RequestValidationException
@@ -134,9 +119,23 @@ public class CreateTableStatement extends SchemaAlteringStatement
         }
     }
 
-    public ClusteringComparator comparator()
+    public CFMetaData.Builder metadataBuilder()
     {
-        return new ClusteringComparator(clusteringTypes, isDense, isCompound);
+        CFMetaData.Builder builder = CFMetaData.Builder.create(keyspace(), columnFamily(), isDense, isCompound, hasCounters);
+        for (int i = 0; i < keyAliases.size(); i++)
+            builder.addPartitionKey(keyAliases.get(i), keyTypes.get(i));
+        for (int i = 0; i < columnAliases.size(); i++)
+            builder.addClusteringColumn(columnAliases.get(i), clusteringTypes.get(i));
+
+        for (Map.Entry<ColumnIdentifier, AbstractType> entry : columns.entrySet())
+        {
+            ColumnIdentifier name = entry.getKey();
+            if (staticColumns.contains(name))
+                builder.addStaticColumn(name, entry.getValue());
+            else
+                builder.addRegularColumn(name, entry.getValue());
+        }
+        return builder;
     }
 
     /**
@@ -148,39 +147,14 @@ public class CreateTableStatement extends SchemaAlteringStatement
      */
     public CFMetaData getCFMetaData() throws RequestValidationException
     {
-        CFMetaData newCFMD;
-        newCFMD = new CFMetaData(keyspace(),
-                                 columnFamily(),
-                                 ColumnFamilyType.Standard,
-                                 comparator());
+        CFMetaData newCFMD = metadataBuilder().build();
         applyPropertiesTo(newCFMD);
         return newCFMD;
     }
 
     public void applyPropertiesTo(CFMetaData cfmd) throws RequestValidationException
     {
-        cfmd.defaultValidator(defaultValidator)
-            .keyValidator(keyTypes.size() == 1 ? keyTypes.get(0) : CompositeType.getInstance(keyTypes))
-            .addAllColumnDefinitions(getColumns(cfmd));
-
-        addColumnMetadataFromAliases(cfmd, keyAliases, keyTypes, ColumnDefinition.Kind.PARTITION_KEY);
-        addColumnMetadataFromAliases(cfmd, columnAliases, clusteringTypes, ColumnDefinition.Kind.CLUSTERING_COLUMN);
-        if (valueAlias != null)
-            addColumnMetadataFromAliases(cfmd, Collections.<ByteBuffer>singletonList(valueAlias), Collections.<AbstractType<?>>singletonList(defaultValidator), ColumnDefinition.Kind.COMPACT_VALUE);
-
         properties.applyToCFMetadata(cfmd);
-    }
-
-    private void addColumnMetadataFromAliases(CFMetaData metadata, List<ByteBuffer> aliases, List<AbstractType<?>> types, ColumnDefinition.Kind kind)
-    {
-        for (int i = 0; i < aliases.size(); ++i)
-        {
-            if (aliases.get(i) != null)
-            {
-                Integer componentIndex = kind == ColumnDefinition.Kind.PARTITION_KEY && types.size() == 1 ? null : i;
-                metadata.addOrReplaceColumnDefinition(new ColumnDefinition(metadata, aliases.get(i), types.get(i), componentIndex, kind));
-            }
-        }
     }
 
     public static class RawStatement extends CFStatement
@@ -223,30 +197,34 @@ public class CreateTableStatement extends SchemaAlteringStatement
 
             CreateTableStatement stmt = new CreateTableStatement(cfName, properties, ifNotExists, staticColumns);
 
-            boolean hasCounters = false;
+            boolean hasNonCounters = false;
             for (Map.Entry<ColumnIdentifier, CQL3Type.Raw> entry : definitions.entrySet())
             {
                 ColumnIdentifier id = entry.getKey();
                 CQL3Type pt = entry.getValue().prepare(keyspace());
                 if (pt.isCollection() && ((CollectionType)pt.getType()).isMultiCell())
                     stmt.collections.put(id.bytes, (CollectionType)pt.getType());
-                else if (entry.getValue().isCounter())
-                    hasCounters = true;
+                if (entry.getValue().isCounter())
+                    stmt.hasCounters = true;
+                else
+                    hasNonCounters = true;
                 stmt.columns.put(id, pt.getType()); // we'll remove what is not a column below
             }
 
             if (keyAliases.isEmpty())
                 throw new InvalidRequestException("No PRIMARY KEY specifed (exactly one required)");
-            else if (keyAliases.size() > 1)
+            if (keyAliases.size() > 1)
                 throw new InvalidRequestException("Multiple PRIMARY KEYs specifed (exactly one required)");
-            else if (hasCounters && properties.getDefaultTimeToLive() > 0)
+            if (stmt.hasCounters && hasNonCounters)
+                throw new InvalidRequestException("Cannot mix counter and non counter columns in the same table");
+            if (stmt.hasCounters && properties.getDefaultTimeToLive() > 0)
                 throw new InvalidRequestException("Cannot set default_time_to_live on a table with counters");
 
             List<ColumnIdentifier> kAliases = keyAliases.get(0);
             stmt.keyTypes = new ArrayList<AbstractType<?>>(kAliases.size());
             for (ColumnIdentifier alias : kAliases)
             {
-                stmt.keyAliases.add(alias.bytes);
+                stmt.keyAliases.add(alias);
                 AbstractType<?> t = getTypeAndRemove(stmt.columns, alias);
                 if (t instanceof CounterColumnType)
                     throw new InvalidRequestException(String.format("counter type is not supported for PRIMARY KEY part %s", alias));
@@ -259,7 +237,7 @@ public class CreateTableStatement extends SchemaAlteringStatement
             // Handle column aliases
             for (ColumnIdentifier t : columnAliases)
             {
-                stmt.columnAliases.add(t.bytes);
+                stmt.columnAliases.add(t);
 
                 AbstractType<?> type = getTypeAndRemove(stmt.columns, t);
                 if (type instanceof CounterColumnType)
@@ -303,23 +281,9 @@ public class CreateTableStatement extends SchemaAlteringStatement
 
             if (stmt.isDense)
             {
-                if (stmt.columns.isEmpty())
-                {
-                    // It's a dense table with only PK columns (so no "compact value"). We accept that because
-                    // we're able to translate it to thrift by using a empty value for the "thrift column value".
-                    // But thus the default validator doesn't matter.
-                    stmt.defaultValidator = BytesType.instance;
-                }
-                else
-                {
-                    if (stmt.columns.size() > 1)
-                        throw new InvalidRequestException(String.format("COMPACT STORAGE with composite PRIMARY KEY allows no more than one column not part of the PRIMARY KEY (got: %s)", StringUtils.join(stmt.columns.keySet(), ", ")));
-
-                    Map.Entry<ColumnIdentifier, AbstractType> lastEntry = stmt.columns.entrySet().iterator().next();
-                    stmt.defaultValidator = lastEntry.getValue();
-                    stmt.valueAlias = lastEntry.getKey().bytes;
-                    stmt.columns.remove(lastEntry.getKey());
-                }
+                // We can have no columns (only the PK), but we can't have more than one.
+                if (stmt.columns.size() > 1)
+                    throw new InvalidRequestException(String.format("COMPACT STORAGE with composite PRIMARY KEY allows no more than one column not part of the PRIMARY KEY (got: %s)", StringUtils.join(stmt.columns.keySet(), ", ")));
             }
             else
             {
@@ -327,12 +291,6 @@ public class CreateTableStatement extends SchemaAlteringStatement
                 // just the PK is fine.
                 if (useCompactStorage && stmt.columns.isEmpty())
                     throw new InvalidRequestException("COMPACT STORAGE with non-composite PRIMARY KEY require one column not part of the PRIMARY KEY, none given");
-
-                // There is no way to insert/access a column that is not defined for non-compact storage, so
-                // the actual validator don't matter much (except that we want to recognize counter CF as limitation apply to them).
-                stmt.defaultValidator = !stmt.columns.isEmpty() && (stmt.columns.values().iterator().next() instanceof CounterColumnType)
-                                      ? CounterColumnType.instance
-                                      : BytesType.instance;
             }
 
 

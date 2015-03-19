@@ -153,24 +153,7 @@ public abstract class AlterTypeStatement extends SchemaAlteringStatement
 
         // We need to update this validator ...
         cfm.addOrReplaceColumnDefinition(def.withNewType(t));
-
-        // ... but if it's part of the comparator or key validator, we need to go update those too.
-        switch (def.kind)
-        {
-            case PARTITION_KEY:
-                cfm.keyValidator(updateWith(cfm.getKeyValidator(), keyspace, toReplace, updated));
-                break;
-            case CLUSTERING_COLUMN:
-                cfm.comparator = updateWith(cfm.comparator, keyspace, toReplace, updated);
-                break;
-        }
         return true;
-    }
-
-    private static ClusteringComparator updateWith(ClusteringComparator comparator, String keyspace, ByteBuffer toReplace, UserType updated)
-    {
-        List<AbstractType<?>> updatedTypes = updateTypes(comparator.subtypes(), keyspace, toReplace, updated);
-        return updatedTypes == null ? comparator : new ClusteringComparator(updatedTypes, comparator.isDense, comparator.isCompound);
     }
 
     // Update the provided type were all instance of a given userType is replaced by a new version

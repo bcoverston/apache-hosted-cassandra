@@ -43,15 +43,19 @@ import org.apache.cassandra.db.marshal.*;
  */
 public class CompositesIndexOnCollectionValue extends CompositesIndex
 {
-    public static ClusteringComparator buildIndexComparator(CFMetaData baseMetadata, ColumnDefinition columnDef)
+    public static void addClusteringColumns(CFMetaData.Builder indexMetadata, CFMetaData baseMetadata, ColumnDefinition columnDef)
     {
-        int prefixSize = columnDef.position();
-        List<AbstractType<?>> types = new ArrayList<>(prefixSize + 2);
-        types.add(SecondaryIndex.keyComparator);
-        for (int i = 0; i < prefixSize; i++)
-            types.add(baseMetadata.comparator.subtype(i));
-        types.add(((CollectionType)columnDef.type).nameComparator()); // collection key
-        return new ClusteringComparator(types, true, true);
+        indexMetadata.addClusteringColumn("partition_key", SecondaryIndex.keyComparator);
+
+        List<ColumnDefinition> cks = baseMetadata.clusteringColumns();
+        for (int i = 0; i < columnDef.position(); i++)
+        {
+            ColumnDefinition def = cks.get(i);
+            indexMetadata.addClusteringColumn(def.name, def.type);
+        }
+
+        // collection key
+        indexMetadata.addClusteringColumn("cell_path", ((CollectionType)columnDef.type).nameComparator());
     }
 
     @Override
