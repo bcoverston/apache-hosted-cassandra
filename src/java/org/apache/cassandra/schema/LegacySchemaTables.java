@@ -798,7 +798,7 @@ public class LegacySchemaTables
         }
         else
         {
-            adder.add("comparator", table.layout().makeLegacyComparator().toString());
+            adder.add("comparator", LegacyLayout.makeLegacyComparator(table).toString());
         }
 
         adder.add("bloom_filter_fp_chance", table.getBloomFilterFpChance());

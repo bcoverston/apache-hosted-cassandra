@@ -140,18 +140,18 @@ public class IndexHelper
 
         public static class Serializer
         {
-            private final LegacyLayout layout;
+            private final CFMetaData metadata;
             private final Version version;
 
-            public Serializer(LegacyLayout layout, Version version)
+            public Serializer(CFMetaData metadata, Version version)
             {
-                this.layout = layout;
+                this.metadata = metadata;
                 this.version = version;
             }
 
             public void serialize(IndexInfo info, DataOutputPlus out, SerializationHeader header) throws IOException
             {
-                ISerializer<ClusteringPrefix> clusteringSerializer = layout.clusteringPrefixSerializer(version, header);
+                ISerializer<ClusteringPrefix> clusteringSerializer = metadata.serializers().clusteringPrefixSerializer(version, header);
                 clusteringSerializer.serialize(info.firstName, out);
                 clusteringSerializer.serialize(info.lastName, out);
                 out.writeLong(info.offset);
@@ -167,7 +167,7 @@ public class IndexHelper
 
             public IndexInfo deserialize(DataInput in, SerializationHeader header) throws IOException
             {
-                ISerializer<ClusteringPrefix> clusteringSerializer = layout.clusteringPrefixSerializer(version, header);
+                ISerializer<ClusteringPrefix> clusteringSerializer = metadata.serializers().clusteringPrefixSerializer(version, header);
 
                 ClusteringPrefix firstName = clusteringSerializer.deserialize(in);
                 ClusteringPrefix lastName = clusteringSerializer.deserialize(in);
@@ -182,7 +182,7 @@ public class IndexHelper
 
             public long serializedSize(IndexInfo info, SerializationHeader header, TypeSizes typeSizes)
             {
-                ISerializer<ClusteringPrefix> clusteringSerializer = layout.clusteringPrefixSerializer(version, header);
+                ISerializer<ClusteringPrefix> clusteringSerializer = metadata.serializers().clusteringPrefixSerializer(version, header);
                 long size = clusteringSerializer.serializedSize(info.firstName, typeSizes)
                           + clusteringSerializer.serializedSize(info.lastName, typeSizes)
                           + typeSizes.sizeof(info.offset)

@@ -373,7 +373,7 @@ public class CacheService implements CacheServiceMBean
                     DecoratedKey key = cfs.partitioner.decorateKey(partitionKey);
                     // TODO
                     // Split cellName into prefix & column name
-                    Pair<Clustering, ColumnDefinition> p = cfs.metadata.layout().decodeCellName(cellName);
+                    Pair<Clustering, ColumnDefinition> p = LegacyLayout.decodeCellName(cfs.metadata, cellName);
                     Clustering clustering = p.left;
                     ColumnDefinition column = p.right;
 

@@ -64,7 +64,7 @@ public class RangeSliceQueryPager extends AbstractQueryPager
             lastReturnedKey = StorageService.getPartitioner().decorateKey(state.partitionKey);
             // Note that while we only encode the clustering in the state, we used to encode the full cellname
             // pre-3.0 so make sure we're backward compatible (as it doesn't cost us much).
-            lastReturnedClustering = cfm.layout().decodeCellName(state.cellName).left;
+            lastReturnedClustering = LegacyLayout.decodeCellName(cfm, state.cellName).left;
             restoreState(state.remaining, state.remainingInPartition);
         }
     }
@@ -73,7 +73,7 @@ public class RangeSliceQueryPager extends AbstractQueryPager
     {
         return lastReturnedKey == null
              ? null
-             : new PagingState(lastReturnedKey.getKey(), cfm.layout().encodeClustering(lastReturnedClustering), maxRemaining(), remainingInPartition());
+             : new PagingState(lastReturnedKey.getKey(), LegacyLayout.encodeClustering(lastReturnedClustering), maxRemaining(), remainingInPartition());
     }
 
     protected DataIterator queryNextPage(int pageSize, ConsistencyLevel consistencyLevel, boolean localQuery)

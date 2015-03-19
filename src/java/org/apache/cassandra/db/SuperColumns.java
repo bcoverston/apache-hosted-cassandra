@@ -43,7 +43,7 @@ public class SuperColumns
     {
         return metadata.isSuper()
              ? metadata.comparator.subtype(subColumn ? 1 : 0)
-             : metadata.layout().makeLegacyComparator();
+             : LegacyLayout.makeLegacyComparator(metadata);
     }
 
     // Extract the first component of a columnName, i.e. the super column name

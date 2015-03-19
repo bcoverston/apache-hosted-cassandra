@@ -64,7 +64,7 @@ public class SinglePartitionPager extends AbstractQueryPager
         {
             // Note that while we only encode the clustering in the state, we used to encode the full cellname
             // pre-3.0 so make sure we're backward compatible (as it doesn't cost us much).
-            lastReturned = cfm.layout().decodeCellName(state.cellName).left;
+            lastReturned = LegacyLayout.decodeCellName(cfm, state.cellName).left;
             restoreState(state.remaining, state.remainingInPartition);
         }
     }
@@ -83,7 +83,7 @@ public class SinglePartitionPager extends AbstractQueryPager
     {
         return lastReturned == null
              ? null
-             : new PagingState(null, cfm.layout().encodeClustering(lastReturned), maxRemaining(), remainingInPartition());
+             : new PagingState(null, LegacyLayout.encodeClustering(lastReturned), maxRemaining(), remainingInPartition());
     }
 
     protected DataIterator queryNextPage(int pageSize, ConsistencyLevel consistencyLevel, boolean localQuery)

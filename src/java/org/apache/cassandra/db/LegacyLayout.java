@@ -41,7 +41,7 @@ import static org.apache.cassandra.io.sstable.IndexHelper.IndexInfo;
  *
  * This is only use to serialize/deserialize the old format.
  */
-public class LegacyLayout
+public abstract class LegacyLayout
 {
     public final static int DELETION_MASK        = 0x01;
     public final static int EXPIRATION_MASK      = 0x02;
@@ -49,20 +49,9 @@ public class LegacyLayout
     public final static int COUNTER_UPDATE_MASK  = 0x08;
     public final static int RANGE_TOMBSTONE_MASK = 0x10;
 
-    private final CFMetaData metadata;
+    private LegacyLayout() {}
 
-    //private final RangeTombstone.Serializer rangeTombstoneSerializer;
-    //private final DeletionInfo.Serializer deletionInfoSerializer;
-
-    public LegacyLayout(CFMetaData metadata)
-    {
-        this.metadata = metadata;
-
-        //this.rangeTombstoneSerializer = new RangeTombstone.Serializer(this);
-        //this.deletionInfoSerializer = new DeletionInfo.Serializer(this);
-    }
-
-    public AbstractType<?> makeLegacyComparator()
+    public static AbstractType<?> makeLegacyComparator(CFMetaData metadata)
     {
         ClusteringComparator comparator = metadata.comparator;
         if (!metadata.isCompound())
@@ -101,50 +90,13 @@ public class LegacyLayout
         return CompositeType.getInstance(types);
     }
 
-    public Deserializer newDeserializer(DataInput in, Version version)
-    {
-        // TODO
-        throw new UnsupportedOperationException();
-    }
-
-    // Note that for the old layout, this will actually discard the cellname parts that are not strictly 
-    // part of the clustering prefix. Don't use this if that's not what you want.
-    public ISerializer<ClusteringPrefix> clusteringPrefixSerializer(final Version version, final SerializationHeader header)
-    {
-        if (!version.storeRows())
-            throw new UnsupportedOperationException();
-
-        return new ISerializer<ClusteringPrefix>()
-        {
-            public void serialize(ClusteringPrefix clustering, DataOutputPlus out) throws IOException
-            {
-                ClusteringPrefix.serializer.serialize(clustering, out, version.correspondingMessagingVersion(), header.clusteringTypes());
-            }
-
-            public ClusteringPrefix deserialize(DataInput in) throws IOException
-            {
-                return ClusteringPrefix.serializer.deserialize(in, version.correspondingMessagingVersion(), header.clusteringTypes());
-            }
-
-            public long serializedSize(ClusteringPrefix clustering, TypeSizes sizes)
-            {
-                return ClusteringPrefix.serializer.serializedSize(clustering, version.correspondingMessagingVersion(), header.clusteringTypes(), sizes);
-            }
-        };
-    }
-
-    public IndexInfo.Serializer indexSerializer(Version version)
-    {
-        return new IndexInfo.Serializer(this, version);
-    }
-
     // This may return a null column definition if the cellname doesn't contain that part.
-    public Pair<Clustering, ColumnDefinition> decodeCellName(ByteBuffer cellname)
+    public static Pair<Clustering, ColumnDefinition> decodeCellName(CFMetaData metadata, ByteBuffer cellname)
     {
         if (!cellname.hasRemaining())
             return Pair.create(Clustering.EMPTY, null);
 
-        Clustering clustering = decodeClustering(cellname);
+        Clustering clustering = decodeClustering(metadata, cellname);
 
         if (metadata.isDense())
             return Pair.create(clustering, metadata.compactValueColumn());
@@ -160,7 +112,7 @@ public class LegacyLayout
         return Pair.create(clustering, def);
     }
 
-    public Clustering decodeClustering(ByteBuffer value)
+    public static Clustering decodeClustering(CFMetaData metadata, ByteBuffer value)
     {
         List<ByteBuffer> components = metadata.isCompound()
                                     ? CompositeType.splitName(value)
@@ -172,7 +124,7 @@ public class LegacyLayout
              : new SimpleClustering(components.subList(0, Math.min(csize, components.size())).toArray(new ByteBuffer[csize]));
     }
 
-    public ByteBuffer encodeClustering(Clustering clustering)
+    public static ByteBuffer encodeClustering(Clustering clustering)
     {
         ByteBuffer[] values = new ByteBuffer[clustering.size()];
         for (int i = 0; i < clustering.size(); i++)
@@ -235,19 +187,19 @@ public class LegacyLayout
     //    }
     //}
 
-    public void skipCellBody(DataInput in, int mask)
-    throws IOException
-    {
-        if ((mask & COUNTER_MASK) != 0)
-            FileUtils.skipBytesFully(in, 16);
-        else if ((mask & EXPIRATION_MASK) != 0)
-            FileUtils.skipBytesFully(in, 16);
-        else
-            FileUtils.skipBytesFully(in, 8);
+    //public void skipCellBody(DataInput in, int mask)
+    //throws IOException
+    //{
+    //    if ((mask & COUNTER_MASK) != 0)
+    //        FileUtils.skipBytesFully(in, 16);
+    //    else if ((mask & EXPIRATION_MASK) != 0)
+    //        FileUtils.skipBytesFully(in, 16);
+    //    else
+    //        FileUtils.skipBytesFully(in, 8);
 
-        int length = in.readInt();
-        FileUtils.skipBytesFully(in, length);
-    }
+    //    int length = in.readInt();
+    //    FileUtils.skipBytesFully(in, length);
+    //}
 
     //public abstract IVersionedSerializer<ColumnSlice> sliceSerializer();
     //public abstract IVersionedSerializer<SliceQueryFilter> sliceQueryFilterSerializer();
@@ -414,34 +366,34 @@ public class LegacyLayout
     //    }
     //}
 
-    public interface Deserializer
-    {
-        /**
-         * Whether this deserializer is done or not, i.e. whether we're reached the end of row marker.
-         */
-        public boolean hasNext() throws IOException;
-        /**
-         * Whether or not some name has been read but not consumed by readNext.
-         */
-        public boolean hasUnprocessed() throws IOException;
-        /**
-         * Comparare the next name to read to the provided Composite.
-         * This does not consume the next name.
-         */
-        public int compareNextTo(Clusterable composite) throws IOException;
-        public int compareNextPrefixTo(Clustering prefix) throws IOException;
-        /**
-         * Actually consume the next name and return it.
-         */
-        public Clustering readNextClustering() throws IOException;
-        public ByteBuffer getNextColumnName();
-        public ByteBuffer getNextCollectionElement();
+    //public interface Deserializer
+    //{
+    //    /**
+    //     * Whether this deserializer is done or not, i.e. whether we're reached the end of row marker.
+    //     */
+    //    public boolean hasNext() throws IOException;
+    //    /**
+    //     * Whether or not some name has been read but not consumed by readNext.
+    //     */
+    //    public boolean hasUnprocessed() throws IOException;
+    //    /**
+    //     * Comparare the next name to read to the provided Composite.
+    //     * This does not consume the next name.
+    //     */
+    //    public int compareNextTo(Clusterable composite) throws IOException;
+    //    public int compareNextPrefixTo(Clustering prefix) throws IOException;
+    //    /**
+    //     * Actually consume the next name and return it.
+    //     */
+    //    public Clustering readNextClustering() throws IOException;
+    //    public ByteBuffer getNextColumnName();
+    //    public ByteBuffer getNextCollectionElement();
 
-        /**
-         * Skip the next name (consuming it). This skip all the name (clustering, column name and collection element).
-         */
-        public void skipNext() throws IOException;
-    }
+    //    /**
+    //     * Skip the next name (consuming it). This skip all the name (clustering, column name and collection element).
+    //     */
+    //    public void skipNext() throws IOException;
+    //}
 
     //public static class DeserializedCell extends AbstractCell
     //{

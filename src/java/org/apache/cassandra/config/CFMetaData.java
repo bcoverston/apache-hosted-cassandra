@@ -184,7 +184,7 @@ public final class CFMetaData
     // for backward compatibility sakes.
     public volatile AbstractType<?> columnNameComparator = UTF8Type.instance;
 
-    private final LegacyLayout layout;
+    private final Serializers serializers;
 
     //OPTIONAL
     private volatile String comment = "";
@@ -273,7 +273,7 @@ public final class CFMetaData
         this.clusteringColumns = clusteringColumns;
         this.partitionColumns = partitionColumns;
 
-        this.layout = new LegacyLayout(this);
+        this.serializers = new Serializers(this);
         rebuild();
     }
 
@@ -1293,7 +1293,7 @@ public final class CFMetaData
         }
 
         // The table might also have no REGULAR columns (be PK-only), but still be "thrift incompatible". See #7832.
-        if (isCQL3OnlyPKComparator(layout.makeLegacyComparator()) && !isDense())
+        if (isCQL3OnlyPKComparator(LegacyLayout.makeLegacyComparator(this)) && !isDense())
             return false;
 
         return true;
@@ -1339,9 +1339,9 @@ public final class CFMetaData
         return isCompound;
     }
 
-    public LegacyLayout layout()
+    public Serializers serializers()
     {
-        return layout;
+        return serializers;
     }
 
     public AbstractType<?> makeLegacyDefaultValidator()
@@ -1386,7 +1386,6 @@ public final class CFMetaData
             .append("speculativeRetry", speculativeRetry)
             .append("droppedColumns", droppedColumns)
             .append("triggers", triggers.values())
-            .append("layout", layout)
             .toString();
     }
 
