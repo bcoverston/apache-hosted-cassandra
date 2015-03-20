@@ -142,11 +142,6 @@ public abstract class CompositesIndex extends AbstractSimplePerColumnSecondaryIn
             logger.debug("removed index entry for cleaned-up value {}:{}", entry.indexValue, upd);
     }
 
-    protected AbstractType<?> getExpressionComparator()
-    {
-        return baseCfs.metadata.getColumnDefinitionComparator(columnDef.kind);
-    }
-
     public SecondaryIndexSearcher createSecondaryIndexSearcher(Set<ColumnDefinition> columns)
     {
         return new CompositesSearcher(baseCfs.indexManager, columns);

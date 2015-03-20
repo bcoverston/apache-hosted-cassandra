@@ -112,7 +112,7 @@ public class AtomicBTreePartition implements Partition
 
     public boolean isEmpty()
     {
-        return ref.deletionInfo.isLive() && BTree.isEmpty(ref.tree);
+        return ref.deletionInfo.isLive() && BTree.isEmpty(ref.tree) && ref.staticRow == null;
     }
 
     public CFMetaData metadata()

@@ -144,6 +144,24 @@ public class ReadPartition extends ArrayBackedPartition implements Iterable<Row>
     @Override
     public String toString()
     {
-        return RowIterators.toString(rowIterator());
+        RowIterator iterator = rowIterator();
+        StringBuilder sb = new StringBuilder();
+        CFMetaData metadata = iterator.metadata();
+        PartitionColumns columns = iterator.columns();
+
+        sb.append(String.format("[%s.%s] key=%s columns=%s reversed=%b",
+                                metadata.ksName,
+                                metadata.cfName,
+                                metadata.getKeyValidator().getString(iterator.partitionKey().getKey()),
+                                columns,
+                                iterator.isReverseOrder()));
+
+        if (iterator.staticRow() != Rows.EMPTY_STATIC_ROW)
+            sb.append("\n    ").append(iterator.staticRow().toString(metadata));
+
+        while (iterator.hasNext())
+            sb.append("\n    ").append(iterator.next().toString(metadata));
+
+        return sb.toString();
     }
 }

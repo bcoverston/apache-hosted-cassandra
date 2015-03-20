@@ -51,31 +51,6 @@ public abstract class RowIterators
         return !iterator.hasNext() && iterator.staticRow().isEmpty();
     }
 
-    // Please note that this is a destructive operation, only useful for debugging or if
-    // you know what you'r doing!
-    public static String toString(RowIterator iterator)
-    {
-        StringBuilder sb = new StringBuilder();
-        CFMetaData metadata = iterator.metadata();
-        PartitionColumns columns = iterator.columns();
-
-        sb.append(String.format("[%s.%s] key=%s columns=%s reversed=%b\n",
-                                metadata.ksName,
-                                metadata.cfName,
-                                metadata.getKeyValidator().getString(iterator.partitionKey().getKey()),
-                                columns,
-                                iterator.isReverseOrder()));
-
-        if (iterator.staticRow() != Rows.EMPTY_STATIC_ROW)
-            sb.append("-----\n").append(iterator.staticRow().toString(metadata));
-
-        while (iterator.hasNext())
-            sb.append("\n-----\n").append(iterator.next().toString(metadata));
-
-        sb.append("\n-----\n");
-        return sb.toString();
-    }
-
     public static PartitionUpdate toUpdate(RowIterator iterator)
     {
         PartitionUpdate update = new PartitionUpdate(iterator.metadata(), iterator.partitionKey(), iterator.columns(), 1, iterator.nowInSec());

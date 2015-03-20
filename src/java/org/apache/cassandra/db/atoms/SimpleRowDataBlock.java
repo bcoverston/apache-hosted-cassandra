@@ -171,7 +171,7 @@ public class SimpleRowDataBlock
             // TODO: we could slightly optimize the columns.idx() calls on the assumption that cells comes in columns order
             int idx = base + columns.simpleIdx(column);
             if (idx < 0)
-                throw new RuntimeException("Cannot fine column " + column + " in " + columns);
+                throw new RuntimeException("Cannot find column " + column.name + " in " + columns);
             data.setCell(idx, value, info);
         }
 
