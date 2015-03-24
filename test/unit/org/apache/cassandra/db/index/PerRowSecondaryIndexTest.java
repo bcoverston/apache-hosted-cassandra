@@ -91,7 +91,7 @@ public class PerRowSecondaryIndexTest
         builder.build().apply();
 
 
-        AtomIterator indexedRow = PerRowSecondaryIndexTest.TestIndex.LAST_INDEXED_ROW;
+        AtomIterator indexedRow = PerRowSecondaryIndexTest.TestIndex.LAST_INDEXED_PARTITION;
         assertNotNull(indexedRow);
         assertEquals(ByteBufferUtil.bytes("foo"), new RowIteratorFromAtomIterator(indexedRow).next().getCell(cdef).value());
 
@@ -100,7 +100,7 @@ public class PerRowSecondaryIndexTest
         builder.add("indexed", ByteBufferUtil.bytes("bar"));
         builder.build().apply();
 
-        indexedRow = PerRowSecondaryIndexTest.TestIndex.LAST_INDEXED_ROW;
+        indexedRow = PerRowSecondaryIndexTest.TestIndex.LAST_INDEXED_PARTITION;
         assertNotNull(indexedRow);
         assertEquals(ByteBufferUtil.bytes("bar"), new RowIteratorFromAtomIterator(indexedRow).next().getCell(cdef).value());
         assertTrue(Arrays.equals("k1".getBytes(), PerRowSecondaryIndexTest.TestIndex.LAST_INDEXED_KEY.array()));
@@ -119,7 +119,7 @@ public class PerRowSecondaryIndexTest
         builder.delete(cdef);
         builder.build().apply();
 
-        AtomIterator indexedRow = PerRowSecondaryIndexTest.TestIndex.LAST_INDEXED_ROW;
+        AtomIterator indexedRow = PerRowSecondaryIndexTest.TestIndex.LAST_INDEXED_PARTITION;
         assertNotNull(indexedRow);
 
         //We filter tombstones now...
@@ -134,7 +134,7 @@ public class PerRowSecondaryIndexTest
         CFMetaData cfm = Schema.instance.getCFMetaData(KEYSPACE1, CF_INDEXED);
         RowUpdateBuilder.deleteRow(cfm, FBUtilities.timestampMicros(), "k3").apply();
 
-        AtomIterator indexedRow = PerRowSecondaryIndexTest.TestIndex.LAST_INDEXED_ROW;
+        AtomIterator indexedRow = PerRowSecondaryIndexTest.TestIndex.LAST_INDEXED_PARTITION;
         assertNotNull(indexedRow);
         assertNotNull(indexedRow.partitionLevelDeletion());
         Assert.assertFalse(new RowIteratorFromAtomIterator(indexedRow).hasNext());
@@ -170,25 +170,25 @@ public class PerRowSecondaryIndexTest
 
     public static class TestIndex extends PerRowSecondaryIndex
     {
-        public static AtomIterator LAST_INDEXED_ROW;
+        public static AtomIterator LAST_INDEXED_PARTITION;
         public static ByteBuffer LAST_INDEXED_KEY;
 
         public static void reset()
         {
             LAST_INDEXED_KEY = null;
-            LAST_INDEXED_ROW = null;
+            LAST_INDEXED_PARTITION = null;
         }
 
         @Override
         public void index(ByteBuffer rowKey, AtomIterator cf)
         {
-            LAST_INDEXED_ROW = cf;
+            LAST_INDEXED_PARTITION = cf;
             LAST_INDEXED_KEY = rowKey;
         }
 
         public void index(ByteBuffer rowKey, PartitionUpdate atoms)
         {
-            LAST_INDEXED_ROW = atoms.toAtomIterator();
+            LAST_INDEXED_PARTITION = atoms.atomIterator();
             LAST_INDEXED_KEY = rowKey;
         }
 
@@ -227,7 +227,7 @@ public class PerRowSecondaryIndexTest
                 @Override
                 public PartitionIterator search(ReadCommand filter)
                 {
-                    return new SingletonPartitionIterator(LAST_INDEXED_ROW);
+                    return new SingletonPartitionIterator(LAST_INDEXED_PARTITION);
                 }
 
                 @Override

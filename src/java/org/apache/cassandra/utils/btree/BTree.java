@@ -126,7 +126,7 @@ public class BTree
      * @param btree              the tree to update
      * @param comparator         the comparator that defines the ordering over the items in the tree
      * @param updateWith         the items to either insert / update
-     * @param updateWithIsSorted if false, updateWith will be copied and sorted to facilitate construction
+     * @param updateWithLength   then number of elements in updateWith
      * @param updateF            the update function to apply to any pairs we are swapping, and maybe abort early
      * @param <V>
      * @return

@@ -157,11 +157,7 @@ public class RowUpdateBuilder
     {
         ColumnDefinition c = getDefinition(columnName);
         assert c != null : "Cannot find column " + columnName;
-        if (value == null)
-            writer.writeCell(c, false, ByteBufferUtil.EMPTY_BYTE_BUFFER, deletionLiveness, null);
-        else
-            writer.writeCell(c, false, bb(value, c.type), defaultLiveness, null);
-        return this;
+        return add(c, value);
     }
 
     public RowUpdateBuilder add(ColumnDefinition columnDefinition, Object value)

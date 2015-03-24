@@ -318,7 +318,7 @@ public abstract class AbstractPartitionData implements Partition
         };
     }
 
-    public AtomIterator toAtomIterator()
+    public AtomIterator atomIterator()
     {
         return atomIterator(columns(), Slices.ALL, false, nowInSec());
     }

@@ -394,7 +394,7 @@ public class SchemaLoader
         CFMetaData cfm = CFMetaData.Builder.create(ksName, cfName)
                 .addPartitionKey("key", AsciiType.instance)
                 .addClusteringColumn("name", AsciiType.instance)
-                .addRegularColumn(new ColumnIdentifier("val", true), AsciiType.instance)
+                .addRegularColumn("val", AsciiType.instance)
                 .build();
 
         return cfm;

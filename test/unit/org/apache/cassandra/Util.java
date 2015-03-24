@@ -32,7 +32,8 @@ import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.atoms.Row;
+import org.apache.cassandra.db.atoms.*;
+import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.db.compaction.AbstractCompactionTask;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.filter.ColumnFilter;
@@ -285,6 +286,21 @@ public class Util
         }
 
         assert thrown : exception.getName() + " not received";
+    }
+
+    public static AtomIterator readFullPartition(ColumnFamilyStore cfs, DecoratedKey key)
+    {
+        SinglePartitionReadCommand cmd = SinglePartitionReadCommand.fullPartitionRead(cfs.metadata, FBUtilities.nowInSeconds(), key);
+        return PartitionIterators.getOnlyElement(cmd.executeLocally(cfs), cmd);
+    }
+
+    public static void consume(AtomIterator iter)
+    {
+        try (AtomIterator iterator = iter)
+        {
+            while (iter.hasNext())
+                iter.next();
+        }
     }
 
    /* public static QueryFilter namesQueryFilter(ColumnFamilyStore cfs, DecoratedKey key)

@@ -279,7 +279,7 @@ public final class CFMetaData
 
     // This rebuild informations that are intrinsically duplicate of the table definition but
     // are kept because they are often useful in a different format.
-    public void rebuild()
+    private void rebuild()
     {
         this.comparator = new ClusteringComparator(extractTypes(clusteringColumns));
 
@@ -1475,10 +1475,20 @@ public final class CFMetaData
             return this;
         }
 
+        public Builder addRegularColumn(String name, AbstractType type)
+        {
+            return addRegularColumn(new ColumnIdentifier(name, false), type);
+        }
+
         public Builder addRegularColumn(ColumnIdentifier name, AbstractType type)
         {
             this.regularColumns.add(Pair.create(name, type));
             return this;
+        }
+
+        public Builder addStaticColumn(String name, AbstractType type)
+        {
+            return addStaticColumn(new ColumnIdentifier(name, false), type);
         }
 
         public Builder addStaticColumn(ColumnIdentifier name, AbstractType type)
