@@ -32,6 +32,7 @@ import org.apache.cassandra.db.ClusteringPrefix;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.atoms.*;
@@ -87,6 +88,30 @@ public class Util
     }
 
 
+    public static Cell getRegularCell(CFMetaData metadata, Row row, String name)
+    {
+        ColumnDefinition cdef = new ColumnDefinition(metadata.ksName, metadata.cfName, new ColumnIdentifier(name, true), metadata.columnNameComparator, null, ColumnDefinition.Kind.REGULAR);
+
+        return row.getCell(cdef);
+    }
+
+    public static ColumnDefinition getColumnDef(CFMetaData cfm, String name)
+    {
+
+        ByteBuffer bb = ByteBufferUtil.bytes(name);
+
+        //No comparator
+        if (cfm.comparator.size() == 0)
+            return cfm.getColumnDefinition(bb);
+
+        for (ColumnDefinition cdef : cfm.allColumns())
+        {
+            if (name.equals(cdef.name.toString()))
+                return cdef;
+        }
+
+        return null;
+    }
 
     /*
     public static CellName cellname(String... strs)
