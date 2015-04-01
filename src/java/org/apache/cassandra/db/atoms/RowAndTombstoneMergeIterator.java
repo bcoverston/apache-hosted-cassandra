@@ -85,6 +85,7 @@ public class RowAndTombstoneMergeIterator extends UnmodifiableIterator<Atom> imp
             {
                 RangeTombstone rt = nextTombstone;
                 nextTombstone = null;
+                inTombstone = false;
                 next = marker.setTo(rt.deletedSlice().end(), rt.deletionTime());
             }
             else
@@ -99,6 +100,7 @@ public class RowAndTombstoneMergeIterator extends UnmodifiableIterator<Atom> imp
             {
                 RangeTombstone rt = nextTombstone;
                 nextTombstone = null;
+                inTombstone = false;
                 next = marker.setTo(rt.deletedSlice().end(), rt.deletionTime());
             }
             else
