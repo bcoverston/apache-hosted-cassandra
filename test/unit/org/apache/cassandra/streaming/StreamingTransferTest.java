@@ -26,6 +26,7 @@ import java.util.concurrent.TimeUnit;
 import com.google.common.collect.Iterables;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.Uninterruptibles;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -42,16 +43,12 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.KSMetaData;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.cql3.QueryProcessor;
+import org.apache.cassandra.cql3.RangeDeletionTest;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.atoms.AtomIterator;
-import org.apache.cassandra.db.atoms.Row;
-import org.apache.cassandra.db.atoms.RowIterator;
-import org.apache.cassandra.db.atoms.RowIteratorFromAtomIterator;
+import org.apache.cassandra.db.atoms.*;
 import org.apache.cassandra.db.context.CounterContext;
-import org.apache.cassandra.db.marshal.BytesType;
-import org.apache.cassandra.db.marshal.CounterColumnType;
-import org.apache.cassandra.db.marshal.IntegerType;
+import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.db.partitions.PartitionIterator;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.dht.IPartitioner;
@@ -98,8 +95,9 @@ public class StreamingTransferTest
                         .addPartitionKey("key", BytesType.instance)
                         .build(),
                 CFMetaData.Builder.create(KEYSPACE1, CF_STANDARDINT)
-                        .withColumnNameComparator(IntegerType.instance)
-                        .addPartitionKey("key", BytesType.instance)
+                        .addPartitionKey("key", AsciiType.instance)
+                        .addClusteringColumn("cols", Int32Type.instance)
+                        .addRegularColumn("val", BytesType.instance)
                         .build(),
                 SchemaLoader.indexCFMD(KEYSPACE1, CF_INDEX, true));
         SchemaLoader.createKeyspace(KEYSPACE2,
@@ -214,8 +212,8 @@ public class StreamingTransferTest
 
             assert readCommand.executeLocally(cfs).hasNext();
             RowIterator row = new RowIteratorFromAtomIterator(iterator.next());
-            assert row.partitionKey().equals(ByteBufferUtil.bytes(key));
-            assert Util.getRegularCell(cfs.metadata, row.next(), col) != null;
+            assert ByteBufferUtil.compareUnsigned(row.partitionKey().getKey(), ByteBufferUtil.bytes(key)) == 0;
+            assert ByteBufferUtil.compareUnsigned(row.next().clustering().get(0), ByteBufferUtil.bytes(col)) == 0;
         }
 
         // and no extra partitions
@@ -290,7 +288,7 @@ public class StreamingTransferTest
             long val = key.hashCode();
 
             // test we can search:
-            UntypedResultSet result = QueryProcessor.executeInternal(String.format("SELECT * FROM \"%s\".\"%s\" WHERE birthdate = %l",
+            UntypedResultSet result = QueryProcessor.executeInternal(String.format("SELECT * FROM \"%s\".\"%s\" WHERE birthdate = %d",
                     cfs.metadata.ksName, cfs.metadata.cfName, val));
             assertEquals(1, result.size());
 
@@ -301,24 +299,44 @@ public class StreamingTransferTest
     /**
      * Test to make sure RangeTombstones at column index boundary transferred correctly.
      */
-    /*@Test
+    @Test
     public void testTransferRangeTombstones() throws Exception
     {
         String ks = KEYSPACE1;
         String cfname = "StandardInteger1";
         Keyspace keyspace = Keyspace.open(ks);
         ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        ClusteringComparator comparator = cfs.getComparator();
 
         String key = "key1";
-        Mutation rm = new Mutation(ks, ByteBufferUtil.bytes(key));
+
+
+        RowUpdateBuilder updates = new RowUpdateBuilder(cfs.metadata, FBUtilities.timestampMicros(), key);
+
         // add columns of size slightly less than column_index_size to force insert column index
-        rm.add(cfname, cellname(1), ByteBuffer.wrap(new byte[DatabaseDescriptor.getColumnIndexSize() - 64]), 2);
-        rm.add(cfname, cellname(6), ByteBuffer.wrap(new byte[DatabaseDescriptor.getColumnIndexSize()]), 2);
-        ColumnFamily cf = rm.addOrGet(cfname);
+        updates.clustering(1)
+                .add("val", ByteBuffer.wrap(new byte[DatabaseDescriptor.getColumnIndexSize() - 64]))
+                .build()
+                .apply();
+
+        updates = new RowUpdateBuilder(cfs.metadata, FBUtilities.timestampMicros(), key);
+        updates.clustering(6)
+                .add("val", ByteBuffer.wrap(new byte[DatabaseDescriptor.getColumnIndexSize()]))
+                .build()
+                .apply();
+
         // add RangeTombstones
-        cf.delete(new DeletionInfo(cellname(2), cellname(3), cf.getComparator(), 1, (int) (System.currentTimeMillis() / 1000)));
-        cf.delete(new DeletionInfo(cellname(5), cellname(7), cf.getComparator(), 1, (int) (System.currentTimeMillis() / 1000)));
-        rm.applyUnsafe();
+        //updates = new RowUpdateBuilder(cfs.metadata, FBUtilities.timestampMicros() + 1 , key);
+        //updates.addRangeTombstone(Slice.make(comparator, comparator.make(2), comparator.make(4)))
+        //        .build()
+        //        .apply();
+
+
+        updates = new RowUpdateBuilder(cfs.metadata, FBUtilities.timestampMicros() + 1, key);
+        updates.addRangeTombstone(Slice.make(comparator, comparator.make(5), comparator.make(7)))
+                .build()
+                .apply();
+
         cfs.forceBlockingFlush();
 
         SSTableReader sstable = cfs.getSSTables().iterator().next();
@@ -329,9 +347,24 @@ public class StreamingTransferTest
         assertEquals(1, cfs.getSSTables().size());
 
         PartitionIterator rows = Util.getRangeSlice(cfs);
-        Assert.assertTrue(rows.hasNext());
-        Assert.assertFalse(!rows.hasNext());
-    }*/
+        RowIterator it = new RowIteratorFromAtomIterator(rows.next());
+
+        Assert.assertTrue(!rows.hasNext());
+        Row r = it.next();
+
+        Assert.assertFalse(r.isEmpty());
+
+        Assert.assertTrue(1 == Int32Type.instance.compose(r.clustering().get(0)));
+
+        boolean failed = false;
+        while (it.hasNext())
+        {
+            failed = true;
+            System.err.println(it.next().toString(cfs.metadata, true));
+        }
+
+        Assert.assertFalse(failed);
+    }
 
     @Test
     public void testTransferTableViaRanges() throws Exception
@@ -345,58 +378,7 @@ public class StreamingTransferTest
         doTransferTable(true);
     }
 
-    /*@Test
-    public void testTransferTableCounter() throws Exception
-    {
-        final Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        final ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Counter1");
-        final CounterContext cc = new CounterContext();
-
-        final Map<String, ColumnFamily> cleanedEntries = new HashMap<>();
-
-        List<String> keys = createAndTransfer(cfs, new Mutator()
-        {
-            // Creates a new SSTable per key: all will be merged before streaming.
-            public void mutate(String key, String col, long timestamp) throws Exception
-            {
-                Map<String, ColumnFamily> entries = new HashMap<>();
-                ColumnFamily cf = ArrayBackedSortedColumns.factory.create(cfs.metadata);
-                ColumnFamily cfCleaned = ArrayBackedSortedColumns.factory.create(cfs.metadata);
-                CounterContext.ContextState state = CounterContext.ContextState.allocate(0, 1, 3);
-                state.writeLocal(CounterId.fromInt(2), 9L, 3L);
-                state.writeRemote(CounterId.fromInt(4), 4L, 2L);
-                state.writeRemote(CounterId.fromInt(6), 3L, 3L);
-                state.writeRemote(CounterId.fromInt(8), 2L, 4L);
-                cf.addColumn(new BufferCounterCell(cellname(col), state.context, timestamp));
-                cfCleaned.addColumn(new BufferCounterCell(cellname(col), cc.clearAllLocal(state.context), timestamp));
-
-                entries.put(key, cf);
-                cleanedEntries.put(key, cfCleaned);
-                cfs.addSSTable(SSTableUtils.prepare()
-                    .ks(keyspace.getName())
-                    .cf(cfs.name)
-                    .generation(0)
-                    .write(entries));
-            }
-        }, true);
-
-        // filter pre-cleaned entries locally, and ensure that the end result is equal
-        cleanedEntries.keySet().retainAll(keys);
-        SSTableReader cleaned = SSTableUtils.prepare()
-            .ks(keyspace.getName())
-            .cf(cfs.name)
-            .generation(0)
-            .write(cleanedEntries);
-        SSTableReader streamed = cfs.getSSTables().iterator().next();
-        SSTableUtils.assertContentEquals(cleaned, streamed);
-
-        // Retransfer the file, making sure it is now idempotent (see CASSANDRA-3481)
-        cfs.clearUnsafe();
-        transferSSTables(streamed);
-        SSTableReader restreamed = cfs.getSSTables().iterator().next();
-        SSTableUtils.assertContentEquals(streamed, restreamed);
-    }
-
+    /*
     @Test
     public void testTransferTableMultiple() throws Exception
     {

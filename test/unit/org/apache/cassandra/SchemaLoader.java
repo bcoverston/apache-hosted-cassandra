@@ -457,9 +457,7 @@ public class SchemaLoader
                 .build();
 
         ByteBuffer cName = ByteBufferUtil.bytes("birthdate");
-        String idxName = withIdxType ? ByteBufferUtil.bytesToHex(ByteBufferUtil.bytes(ksName + "_" + cfName + "_" + "birthdate")) : null;
-        IndexType idxType = withIdxType ? IndexType.COMPOSITES : null;
-        cfm.getColumnDefinition(cName).setIndex(idxName, idxType, Collections.EMPTY_MAP);
+        cfm.getColumnDefinition(cName).setIndex(withIdxType ? ByteBufferUtil.bytesToHex(cName) : null, IndexType.COMPOSITES, Collections.EMPTY_MAP);
 
         return cfm;
     }
@@ -471,7 +469,7 @@ public class SchemaLoader
         ByteBuffer cName = ByteBufferUtil.bytes("col1");
         IndexType idxType = withIdxType ? IndexType.COMPOSITES : null;
         return cfm.addColumnDefinition(ColumnDefinition.regularDef(cfm, cName, UTF8Type.instance, 1)
-                                                       .setIndex("col1_idx", idxType, Collections.<String, String>emptyMap()));
+                  .setIndex(withIdxType ? "col1_idx" : null, idxType, Collections.<String, String>emptyMap()));
     }
     
     private static CFMetaData jdbcCFMD(String ksName, String cfName, AbstractType comp)

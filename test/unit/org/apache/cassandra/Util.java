@@ -95,24 +95,6 @@ public class Util
         return row.getCell(cdef);
     }
 
-    public static ColumnDefinition getColumnDef(CFMetaData cfm, String name)
-    {
-
-        ByteBuffer bb = ByteBufferUtil.bytes(name);
-
-        //No comparator
-        if (cfm.comparator.size() == 0)
-            return cfm.getColumnDefinition(bb);
-
-        for (ColumnDefinition cdef : cfm.allColumns())
-        {
-            if (name.equals(cdef.name.toString()))
-                return cdef;
-        }
-
-        return null;
-    }
-
     /*
     public static CellName cellname(String... strs)
     {
@@ -201,11 +183,7 @@ public class Util
         if (superColumn != null)
             filter.add(cfs.metadata.compactValueColumn(), Operator.EQ, superColumn);
 
-        ReadCommand command =  new PartitionRangeReadCommand(cfs.metadata,
-                FBUtilities.nowInSeconds(),
-                filter,
-                DataLimits.cqlLimits(100000),
-                DataRange.allData(cfs.metadata, cfs.partitioner));
+        ReadCommand command = new PartitionRangeReadCommand(cfs.metadata, FBUtilities.nowInSeconds() +1 , filter, DataLimits.cqlLimits(100000), DataRange.allData(cfs.metadata, cfs.partitioner));
 
         return command.executeLocally(cfs);
     }

@@ -153,6 +153,12 @@ public class RowUpdateBuilder
         return this;
     }
 
+    public RowUpdateBuilder addRangeTombstone(Slice slice)
+    {
+        update.addRangeTombstone(slice, deletionTime);
+        return this;
+    }
+
     public RowUpdateBuilder add(String columnName, Object value)
     {
         ColumnDefinition c = getDefinition(columnName);
