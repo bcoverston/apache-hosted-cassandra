@@ -196,7 +196,7 @@ public class Slice
             // we already know the first component falls within its min/max range (otherwise we wouldn't get here)
             if (j > 0 && (j < end.size() && comparator.compareComponent(j, f, minClusteringValues.get(j)) < 0 ||
                         j < start.size() && comparator.compareComponent(j, s, maxClusteringValues.get(j)) > 0))
-                continue;
+                return false;
 
             // if this component isn't equal in the start and finish, we don't need to check any more
             if (j >= start.size() || j >= end.size() || comparator.compareComponent(j, s, f) != 0)
