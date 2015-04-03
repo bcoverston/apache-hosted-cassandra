@@ -68,8 +68,8 @@ public class Slice
     private Slice(Bound start, Bound end)
     {
         assert start.isStart() && !end.isStart();
-        this.start = start;
-        this.end = end;
+        this.start = start.takeAlias();
+        this.end = end.takeAlias();
     }
 
     public static Slice make(Bound start, Bound end)
@@ -385,6 +385,10 @@ public class Slice
             }
             return sb.append(")").toString();
         }
+
+        // Overriding to get a more precise type
+        @Override
+        public abstract Bound takeAlias();
 
         public static Builder builder(int size)
         {

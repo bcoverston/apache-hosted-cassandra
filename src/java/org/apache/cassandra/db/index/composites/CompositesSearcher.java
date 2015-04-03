@@ -142,7 +142,7 @@ public class CompositesSearcher extends SecondaryIndexSearcher
                 SortedSet<Clustering> requested = ((NamesPartitionFilter)filter).requestedRows();
                 SortedSet<Clustering> clusterings = new TreeSet<>(index.getIndexComparator());
                 for (Clustering c : requested)
-                    clusterings.add(index.makeIndexClustering(pk, c, null));
+                    clusterings.add(index.makeIndexClustering(pk, c, null).takeAlias());
                 return new NamesPartitionFilter(PartitionColumns.NONE, clusterings, filter.isReversed());
             }
             else
@@ -263,7 +263,7 @@ public class CompositesSearcher extends SecondaryIndexSearcher
                 {
                     // We're queried a slice of the index, but some hits may not match some of the clustering column constraints
                     if (isMatchingEntry(partitionKey, nextEntry, command))
-                        clusterings.add(nextEntry.indexedEntryClustering);
+                        clusterings.add(nextEntry.indexedEntryClustering.takeAlias());
 
                     nextEntry = indexHits.hasNext() ? index.decodeEntry(indexKey, indexHits.next()) : null;
                 }

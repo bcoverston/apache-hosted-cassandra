@@ -286,7 +286,7 @@ public class NamesPartitionFilter extends AbstractPartitionFilter
             SortedSet<Clustering> clusterings = new TreeSet(comparator);
             int size = in.readInt();
             for (int i = 0; i < size; i++)
-                clusterings.add(Clustering.serializer.deserialize(in, version, comparator.subtypes()));
+                clusterings.add(Clustering.serializer.deserialize(in, version, comparator.subtypes()).takeAlias());
 
             return new NamesPartitionFilter(columns, clusterings, reversed);
         }
