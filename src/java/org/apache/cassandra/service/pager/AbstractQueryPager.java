@@ -48,7 +48,13 @@ abstract class AbstractQueryPager implements QueryPager
     protected final DataLimits limits;
 
     private int remaining;
-    private int remainingInPartition = -1;
+
+    // This is the last key we've been reading from (or can still be reading within). This the key for
+    // which remainingInPartition makes sense: if we're starting another key, we should reset remainingInPartition
+    // (and this is done in PagerIterator). This can be null (when we start).
+    private DecoratedKey lastKey;
+    private int remainingInPartition;
+
     private boolean exhausted;
 
     protected AbstractQueryPager(ConsistencyLevel consistencyLevel,
@@ -63,6 +69,7 @@ abstract class AbstractQueryPager implements QueryPager
         this.limits = limits;
 
         this.remaining = limits.count();
+        this.remainingInPartition = limits.perPartitionCount();
     }
 
     public DataIterator fetchPage(int pageSize) throws RequestValidationException, RequestExecutionException
@@ -76,23 +83,25 @@ abstract class AbstractQueryPager implements QueryPager
 
     private class PagerIterator extends CountingDataIterator
     {
-        private final DataLimits limits;
+        private final DataLimits pageLimits;
 
-        private DecoratedKey lastKey;
         private Row lastRow;
 
-        private PagerIterator(DataIterator iter, DataLimits limits)
+        private PagerIterator(DataIterator iter, DataLimits pageLimits)
         {
-            super(iter, limits);
-            this.limits = limits;
+            super(iter, pageLimits);
+            this.pageLimits = pageLimits;
         }
 
         @Override
         public RowIterator next()
         {
             RowIterator iter = super.next();
-            lastKey = iter.partitionKey();
-            remainingInPartition = limits.perPartitionCount();
+            DecoratedKey key = iter.partitionKey();
+            if (lastKey == null || !lastKey.equals(key))
+                remainingInPartition = limits.perPartitionCount();
+
+            lastKey = key;
             return new RowPagerIterator(iter);
         }
 
@@ -105,7 +114,7 @@ abstract class AbstractQueryPager implements QueryPager
             int counted = counter.counted();
             remaining -= counted;
             remainingInPartition -= counter.countedInCurrentPartition();
-            exhausted = counted < limits.count();
+            exhausted = counted < pageLimits.count();
         }
 
         private class RowPagerIterator extends WrappingRowIterator
@@ -124,8 +133,9 @@ abstract class AbstractQueryPager implements QueryPager
         }
     }
 
-    protected void restoreState(int remaining, int remainingInPartition)
+    protected void restoreState(DecoratedKey lastKey, int remaining, int remainingInPartition)
     {
+        this.lastKey = lastKey;
         this.remaining = remaining;
         this.remainingInPartition = remainingInPartition;
     }
@@ -140,7 +150,6 @@ abstract class AbstractQueryPager implements QueryPager
         return remaining;
     }
 
-    // Only meaningful after a call to fetchPage or after having called restoreState, will return -1 otherwise.
     protected int remainingInPartition()
     {
         return remainingInPartition;

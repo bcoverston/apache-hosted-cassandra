@@ -65,7 +65,7 @@ public class SinglePartitionPager extends AbstractQueryPager
             // Note that while we only encode the clustering in the state, we used to encode the full cellname
             // pre-3.0 so make sure we're backward compatible (as it doesn't cost us much).
             lastReturned = LegacyLayout.decodeCellName(cfm, state.cellName).left;
-            restoreState(state.remaining, state.remainingInPartition);
+            restoreState(command.partitionKey(), state.remaining, state.remainingInPartition);
         }
     }
 
