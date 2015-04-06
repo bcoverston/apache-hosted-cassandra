@@ -190,7 +190,7 @@ public class BatchlogManager implements BatchlogManagerMBean
                                                  SystemKeyspace.NAME,
                                                  SystemKeyspace.BATCHLOG,
                                                  PAGE_SIZE),
-                                   id);
+                                                 id);
         }
 
         cleanup();

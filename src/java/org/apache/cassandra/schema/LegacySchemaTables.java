@@ -1173,8 +1173,8 @@ public class LegacySchemaTables
     private static AbstractType<?> getComponentComparator(AbstractType<?> rawComparator, Integer componentIndex)
     {
         return (componentIndex == null || (componentIndex == 0 && !(rawComparator instanceof CompositeType)))
-               ? rawComparator
-               : ((CompositeType)rawComparator).types.get(componentIndex);
+                ? rawComparator
+                : ((CompositeType)rawComparator).types.get(componentIndex);
     }
 
     /*

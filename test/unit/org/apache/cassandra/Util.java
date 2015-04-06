@@ -28,21 +28,22 @@ import java.util.*;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
 
+import org.apache.cassandra.db.ClusteringPrefix;
+
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.atoms.*;
+import org.apache.cassandra.db.filter.*;
 import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.db.compaction.AbstractCompactionTask;
 import org.apache.cassandra.db.compaction.CompactionManager;
-import org.apache.cassandra.db.filter.ColumnFilter;
-import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.partitions.PartitionIterator;
-import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.RandomPartitioner.BigIntegerToken;
+import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.gms.ApplicationState;
 import org.apache.cassandra.gms.Gossiper;
@@ -50,8 +51,8 @@ import org.apache.cassandra.gms.VersionedValue;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.thrift.SuperColumn;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.CounterId;
 import org.apache.cassandra.utils.FBUtilities;
 
 import static org.junit.Assert.assertTrue;
@@ -115,12 +116,14 @@ public class Util
     {
         return new BufferExpiringCell(cellname(name), ByteBufferUtil.bytes(value), timestamp, ttl);
     }
+    */
 
     public static Token token(String key)
     {
         return StorageService.getPartitioner().getToken(ByteBufferUtil.bytes(key));
     }
 
+    /*
     public static Range<RowPosition> range(String left, String right)
     {
         return new Range<RowPosition>(rp(left), rp(right));
@@ -143,6 +146,7 @@ public class Util
                        : CellNames.compositeDense(ByteBufferUtil.bytes(superColumnName), getBytes(columnName));
         rm.add(columnFamilyName, cname, ByteBufferUtil.bytes(value), timestamp);
     }
+    */
 
     public static ByteBuffer getBytes(long v)
     {
@@ -162,22 +166,51 @@ public class Util
         return bb;
     }
 
-    */
     public static PartitionIterator getRangeSlice(ColumnFamilyStore cfs)
     {
         return getRangeSlice(cfs, null);
     }
-
     public static PartitionIterator getRangeSlice(ColumnFamilyStore cfs, ByteBuffer superColumn)
     {
-
         ColumnFilter filter = new ColumnFilter();
         if (superColumn != null)
             filter.add(cfs.metadata.compactValueColumn(), Operator.EQ, superColumn);
 
-        ReadCommand command =  new PartitionRangeReadCommand(cfs.metadata, FBUtilities.nowInSeconds(), filter, DataLimits.cqlLimits(100000), DataRange.allData(cfs.metadata, cfs.partitioner));
+        ReadCommand command =  new PartitionRangeReadCommand(cfs.metadata,
+                FBUtilities.nowInSeconds(),
+                filter,
+                DataLimits.cqlLimits(100000),
+                DataRange.allData(cfs.metadata, cfs.partitioner));
 
         return command.executeLocally(cfs);
+    }
+    public static DataIterator getRangeSlice(ColumnFamilyStore cfs,
+                                             ByteBuffer startKey,
+                                             ByteBuffer endKey,
+                                             ByteBuffer superColumn,
+                                             ColumnFilter filter,
+                                             ByteBuffer... columns)
+    {
+        return makeReadCommand(cfs, startKey, endKey, superColumn, filter, columns).executeLocally();
+    }
+    public static ReadCommand makeReadCommand(ColumnFamilyStore cfs,
+                                              ByteBuffer startKey,
+                                              ByteBuffer endKey,
+                                              ByteBuffer superColumn,
+                                              ColumnFilter filter,
+                                              ByteBuffer... columns)
+    {
+        AbstractReadCommandBuilder builder = new PartitionRangeReadBuilder(cfs, FBUtilities.nowInSeconds())
+                .setKeyBounds(startKey, endKey)
+                .replaceFilter(filter);
+
+        for (ByteBuffer bb : columns)
+            builder.addColumn(bb);
+
+        if (superColumn != null)
+            builder.setSuper(superColumn);
+
+        return builder.build();
     }
 
     /**
@@ -200,22 +233,26 @@ public class Util
         return store;
     }
 
-   /* public static ColumnFamily getColumnFamily(Keyspace keyspace, DecoratedKey key, String cfName)
+    /*
+    public static ColumnFamily getColumnFamily(Keyspace keyspace, DecoratedKey key, String cfName)
     {
         ColumnFamilyStore cfStore = keyspace.getColumnFamilyStore(cfName);
         assert cfStore != null : "Table " + cfName + " has not been defined";
         return cfStore.getColumnFamily(QueryFilter.getIdentityFilter(key, cfName, System.currentTimeMillis()));
     }
+    */
 
     public static boolean equalsCounterId(CounterId n, ByteBuffer context, int offset)
     {
         return CounterId.wrap(context, context.position() + offset).equals(n);
     }
 
+    /*
     public static ColumnFamily cloneAndRemoveDeleted(ColumnFamily cf, int gcBefore)
     {
         return ColumnFamilyStore.removeDeleted(cf.cloneMe(), gcBefore);
-    } */
+    }
+    */
 
     /**
      * Creates initial set of nodes and tokens. Nodes are added to StorageService as 'normal'
@@ -299,6 +336,11 @@ public class Util
         return ReadPartition.create(readFullPartition(cfs, key));
     }
 
+    public static Row getSingleRow(ColumnFamilyStore cfs, DecoratedKey dk)
+    {
+        return materializePartition(cfs, dk).lastRow();
+    }
+
     public static void consume(AtomIterator iter)
     {
         try (AtomIterator iterator = iter)
@@ -356,4 +398,13 @@ public class Util
         Composite endName = CellNames.simpleDense(ByteBufferUtil.bytes(finish));
         return new RangeTombstone(startName, endName, timestamp , localtime);
     } */
+
+    public static CBuilder getCBuilderForCFM(CFMetaData cfm)
+    {
+        List<ColumnDefinition> clusteringColumns = cfm.clusteringColumns();
+        List<AbstractType<?>> types = new ArrayList<>(clusteringColumns.size());
+        for (ColumnDefinition def : clusteringColumns)
+            types.add(def.type);
+        return CBuilder.create(new ClusteringComparator(types));
+    }
 }
