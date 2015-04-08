@@ -193,6 +193,7 @@ public abstract class Slices implements Iterable<Slice>
         public Builder add(Slice slice)
         {
             assert slices.size() == 0 || comparator.compare(slices.get(slices.size()-1).end(), slice.start()) <= 0;
+            assert comparator.compare(slice.start(), slice.end()) <= 0;
             slices.add(slice);
             return this;
         }

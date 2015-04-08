@@ -365,11 +365,11 @@ public class SliceTest
         assertSlicesValid(cc, slices(s(3, 3), s(4, 4)));
         assertSlicesValid(cc, slices(s(0, 3), s(4, 5), s(6, 9)));
         assertSlicesValid(cc, slices(s(-1, -1)));
-        assertSlicesValid(cc, slices(s(-1, 3), s(4, -1)));
 
         assertSlicesInvalid(cc, slices(s(0, 2), s(2, 4)));
         assertSlicesInvalid(cc, slices(s(0, 2), s(1, 4)));
         assertSlicesInvalid(cc, slices(s(0, 2), s(3, 4), s(3, 4)));
+        assertSlicesInvalid(cc, slices(s(-1, 3), s(4, -1)));
         assertSlicesInvalid(cc, slices(s(-1, 2), s(3, -1), s(5, 9)));
     }
 
