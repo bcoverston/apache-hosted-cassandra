@@ -18,6 +18,7 @@
 package org.apache.cassandra.db;
 
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 
@@ -44,6 +45,11 @@ public class ClusteringComparator implements Comparator<Clusterable>
     private final Comparator<IndexInfo> indexComparator;
     private final Comparator<IndexInfo> indexReverseComparator;
     private final Comparator<Clusterable> reverseComparator;
+
+    public ClusteringComparator(AbstractType<?>... clusteringTypes)
+    {
+        this(Arrays.<AbstractType<?>>asList(clusteringTypes));
+    }
 
     public ClusteringComparator(List<AbstractType<?>> clusteringTypes)
     {

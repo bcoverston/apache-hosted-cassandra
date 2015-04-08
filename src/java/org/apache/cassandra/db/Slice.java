@@ -121,6 +121,32 @@ public class Slice
     }
 
     /**
+     * Return whether the slice is empty.
+     *
+     * @param comparator the comparator to compare the bounds.
+     * @return whether the slice formed is empty or not.
+     */
+    public boolean isEmpty(ClusteringComparator comparator)
+    {
+        return isEmpty(comparator, start(), end());
+    }
+
+    /**
+     * Return whether the slice formed by the two provided bound is empty or not.
+     *
+     * @param comparator the comparator to compare the bounds.
+     * @param start the start for the slice to consider. This must be a start bound.
+     * @param end the end for the slice to consider. This must be an end bound.
+     * @return whether the slice formed by {@code start} and {@code end} is
+     * empty or not.
+     */
+    public static boolean isEmpty(ClusteringComparator comparator, Slice.Bound start, Slice.Bound end)
+    {
+        assert start.isStart() && end.isEnd();
+        return comparator.compare(end, start) < 0;
+    }
+
+    /**
      * Returns whether a given clustering is selected by this slice.
      *
      * @param comparator the comparator for the table this is a slice of.
@@ -322,9 +348,27 @@ public class Slice
             return kind().isStart();
         }
 
+        public boolean isEnd()
+        {
+            return !isStart();
+        }
+
         public boolean isInclusive()
         {
             return kind().isInclusive();
+        }
+
+        /**
+         * Returns the inverse of the current bound.
+         * <p>
+         * This invert both start into end (and vice-versa) and inclusive into exclusive (and vice-versa).
+         *
+         * @return the invert of this bound. For instance, if this bound is an exlusive start, this return
+         * an inclusive end with the same values.
+         */
+        public Slice.Bound invert()
+        {
+            return withNewKind(kind().invert());
         }
 
         public void digest(MessageDigest digest)

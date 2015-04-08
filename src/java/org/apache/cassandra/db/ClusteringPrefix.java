@@ -77,6 +77,26 @@ public interface ClusteringPrefix extends Aliasable<ClusteringPrefix>, IMeasurab
         {
             return this != Kind.EXCL_START_BOUND && this != Kind.EXCL_END_BOUND;
         }
+
+        /**
+         * Returns the inverse of the current kind.
+         * <p>
+         * This invert both start into end (and vice-versa) and inclusive into exclusive (and vice-versa).
+         *
+         * @return the invert of this kind. For instance, if this kind is an exlusive start, this return
+         * an inclusive end.
+         */
+        public Kind invert()
+        {
+            switch (this)
+            {
+                case EXCL_START_BOUND: return INCL_END_BOUND;
+                case INCL_START_BOUND: return EXCL_END_BOUND;
+                case EXCL_END_BOUND:   return INCL_START_BOUND;
+                case INCL_END_BOUND:   return EXCL_START_BOUND;
+                default:               return this;
+            }
+        }
     }
 
     public Kind kind();

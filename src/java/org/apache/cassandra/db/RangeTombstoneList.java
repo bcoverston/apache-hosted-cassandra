@@ -214,7 +214,7 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>, IMeasurable
             int j = 0;
             while (i < size && j < tombstones.size)
             {
-                if (comparator.compare(tombstones.starts[j], ends[i]) <= 0)
+                if (comparator.compare(tombstones.starts[j], ends[i]) < 0)
                 {
                     insertFrom(i, tombstones.starts[j], tombstones.ends[j], tombstones.markedAts[j], tombstones.delTimes[j]);
                     j++;
@@ -269,12 +269,7 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>, IMeasurable
         int pos = Arrays.binarySearch(starts, startIdx, endIdx, name, comparator);
         if (pos >= 0)
         {
-            // We're exactly on an interval start. The one subtility is that we need to check if
-            // the previous is not equal to us and doesn't have a higher marked at
-            if (pos > 0 && comparator.compare(name, ends[pos-1]) == 0 && markedAts[pos-1] > markedAts[pos])
-                return pos-1;
-            else
-                return pos;
+            return pos;
         }
         else
         {
@@ -504,51 +499,24 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>, IMeasurable
 
     /*
      * Inserts a new element starting at index i. This method assumes that:
-     *    ends[i-1] <= start <= ends[i]
+     *    ends[i-1] < start < ends[i]
+     * (note that we cannot have start == end since both will at least have a different bound "kind")
      *
      * A RangeTombstoneList is a list of range [s_0, e_0]...[s_n, e_n] such that:
      *   - s_i <= e_i
-     *   - e_i <= s_i+1
-     *   - if s_i == e_i and e_i == s_i+1 then s_i+1 < e_i+1
-     * Basically, range are non overlapping except for their bound and in order. And while
-     * we allow ranges with the same value for the start and end, we don't allow repeating
-     * such range (so we can't have [0, 0][0, 0] even though it would respect the first 2
-     * conditions).
-     *
+     *   - e_i < s_i+1
+     * Basically, range are non overlapping and in order.
      */
     private void insertFrom(int i, Slice.Bound start, Slice.Bound end, long markedAt, int delTime)
     {
         while (i < size)
         {
-            assert i == 0 || comparator.compare(ends[i-1], start) <= 0;
+            assert start.isStart() && end.isEnd();
+            assert i == 0 || comparator.compare(ends[i-1], start) < 0;
+            assert comparator.compare(start, ends[i]) < 0;
 
-            int c = comparator.compare(start, ends[i]);
-            assert c <= 0;
-            if (c == 0)
-            {
-                // If start == ends[i], then we can insert from the next one (basically the new element
-                // really start at the next element), except for the case where starts[i] == ends[i].
-                // In this latter case, if we were to move to next element, we could end up with ...[x, x][x, x]...
-                if (comparator.compare(starts[i], ends[i]) == 0)
-                {
-                    // The current element cover a single value which is equal to the start of the inserted
-                    // element. If the inserted element overwrites the current one, just remove the current
-                    // (it's included in what we insert) and proceed with the insert.
-                    if (markedAt > markedAts[i])
-                    {
-                        removeInternal(i);
-                        continue;
-                    }
-
-                    // Otherwise (the current singleton interval override the new one), we want to leave the
-                    // current element and move to the next, unless start == end since that means the new element
-                    // is in fact fully covered by the current one (so we're done)
-                    if (comparator.compare(start, end) == 0)
-                        return;
-                }
-                i++;
-                continue;
-            }
+            if (Slice.isEmpty(comparator, start, end))
+                return;
 
             // Do we overwrite the current element?
             if (markedAt > markedAts[i])
@@ -558,26 +526,24 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>, IMeasurable
                 // First deal with what might come before the newly added one.
                 if (comparator.compare(starts[i], start) < 0)
                 {
-                    addInternal(i, starts[i], start, markedAts[i], delTimes[i]);
-                    i++;
-                    // We don't need to do the following line, but in spirit that's what we want to do
-                    // setInternal(i, start, ends[i], markedAts, delTime])
+                    Slice.Bound newEnd = start.invert();
+                    if (!Slice.isEmpty(comparator, starts[i], newEnd))
+                    {
+                        addInternal(i, starts[i], start.invert(), markedAts[i], delTimes[i]);
+                        i++;
+                        setInternal(i, start, ends[i], markedAt, delTime);
+                    }
                 }
 
                 // now, start <= starts[i]
 
-                // Does the new element stops before/at the current one,
+                // Does the new element stops before the current one,
                 int endCmp = comparator.compare(end, starts[i]);
-                if (endCmp <= 0)
+                if (endCmp < 0)
                 {
-                    // Here start <= starts[i] and end <= starts[i]
+                    // Here start <= starts[i] and end < starts[i]
                     // This means the current element is before the current one. However, one special
-                    // case is if end == starts[i] and starts[i] == ends[i]. In that case,
-                    // the new element entirely overwrite the current one and we can just overwrite
-                    if (endCmp == 0 && comparator.compare(starts[i], ends[i]) == 0)
-                        setInternal(i, start, end, markedAt, delTime);
-                    else
-                        addInternal(i, start, end, markedAt, delTime);
+                    addInternal(i, start, end, markedAt, delTime);
                     return;
                 }
 
@@ -596,20 +562,27 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>, IMeasurable
                         return;
                     }
 
-                    setInternal(i, start, ends[i], markedAt, delTime);
-                    if (cmp == 0)
+                    // Otherwise, the new element overwite until the min(end, next start)
+                    if (comparator.compare(end, starts[i+1]) < 0)
+                    {
+                        setInternal(i, start, end, markedAt, delTime);
+                        // We have fully handled the new element so we're done
                         return;
+                    }
 
-                    start = ends[i];
+                    setInternal(i, start, starts[i+1].invert(), markedAt, delTime);
+                    start = starts[i+1];
                     i++;
                 }
                 else
                 {
-                    // We don't ovewrite fully. Insert the new interval, and then update the now next
+                    // We don't overwrite fully. Insert the new interval, and then update the now next
                     // one to reflect the not overwritten parts. We're then done.
                     addInternal(i, start, end, markedAt, delTime);
                     i++;
-                    setInternal(i, end, ends[i], markedAts[i], delTimes[i]);
+                    Slice.Bound newStart = end.invert();
+                    if (!Slice.isEmpty(comparator, newStart, ends[i]))
+                        setInternal(i, newStart, ends[i], markedAts[i], delTimes[i]);
                     return;
                 }
             }
@@ -623,13 +596,17 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>, IMeasurable
                     // If we stop before the start of the current element, just insert the new
                     // interval and we're done; otherwise insert until the beginning of the
                     // current element
-                    if (comparator.compare(end, starts[i]) <= 0)
+                    if (comparator.compare(end, starts[i]) < 0)
                     {
                         addInternal(i, start, end, markedAt, delTime);
                         return;
                     }
-                    addInternal(i, start, starts[i], markedAt, delTime);
-                    i++;
+                    Slice.Bound newEnd = starts[i].invert();
+                    if (!Slice.isEmpty(comparator, start, newEnd))
+                    {
+                        addInternal(i, start, newEnd, markedAt, delTime);
+                        i++;
+                    }
                 }
 
                 // After that, we're overwritten on the current element but might have
@@ -639,7 +616,7 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>, IMeasurable
                 if (comparator.compare(end, ends[i]) <= 0)
                     return;
 
-                start = ends[i];
+                start = ends[i].invert();
                 i++;
             }
         }
