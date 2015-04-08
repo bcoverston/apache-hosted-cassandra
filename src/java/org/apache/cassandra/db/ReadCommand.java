@@ -137,7 +137,7 @@ public abstract class ReadCommand extends ReadQuery
      * This contains those restrictions that are not directly handled by the
      * {@code PartitionFilter}. More specifically, this includes any non-PK columns
      * restrictions and can include some PK columns restrictions when those can't be
-     * satisfied entirerly by the partition filter (because not all clustering columns
+     * satisfied entirely by the partition filter (because not all clustering columns
      * have been restricted for instance). If there is 2ndary indexes on the table,
      * one of this restriction might be handled by a 2ndary index.
      *

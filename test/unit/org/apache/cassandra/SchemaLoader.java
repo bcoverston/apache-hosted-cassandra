@@ -223,7 +223,7 @@ public class SchemaLoader
                 standardCFMD(ks4, "Standard3"),
                 superCFMD(ks4, "Super3", bytes),
                 superCFMD(ks4, "Super4", TimeUUIDType.instance),
-                superCFMD(ks4, "Super5", TimeUUIDType.instance, bytes)));
+                superCFMD(ks4, "Super5", TimeUUIDType.instance, BytesType.instance)));
 
         // Keyspace 5
         schema.add(KSMetaData.testMetadata(ks5,
@@ -391,36 +391,77 @@ public class SchemaLoader
 
     public static CFMetaData standardCFMD(String ksName, String cfName)
     {
-        CFMetaData cfm = CFMetaData.Builder.create(ksName, cfName)
+        return standardCFMD(ksName, cfName, 1);
+    }
+
+    public static CFMetaData standardCFMD(String ksName, String cfName, int columnCount)
+    {
+        CFMetaData.Builder builder = CFMetaData.Builder.create(ksName, cfName)
                 .addPartitionKey("key", AsciiType.instance)
                 .addClusteringColumn("name", AsciiType.instance)
-                .addRegularColumn("val", AsciiType.instance)
-                .build();
+                .addRegularColumn("val", AsciiType.instance);
 
-        return cfm;
+        for (int i = 0; i < columnCount; i++)
+            builder.addRegularColumn("val" + i, AsciiType.instance);
+
+        return builder.build();
     }
+
+    public static CFMetaData denseCFMD(String ksName, String cfName)
+    {
+        return denseCFMD(ksName, cfName, AsciiType.instance);
+    }
+    public static CFMetaData denseCFMD(String ksName, String cfName, AbstractType cc)
+    {
+        return denseCFMD(ksName, cfName, cc, null);
+    }
+    public static CFMetaData denseCFMD(String ksName, String cfName, AbstractType cc, AbstractType subcc)
+    {
+        AbstractType comp = cc;
+        if (subcc != null)
+            comp = CompositeType.getInstance(Arrays.asList(new AbstractType<?>[]{cc, subcc}));
+
+        return CFMetaData.Builder.createDense(ksName, cfName, subcc != null, false)
+            .addPartitionKey("key", AsciiType.instance)
+            .addClusteringColumn("cols", comp)
+            .addRegularColumn("val", AsciiType.instance)
+            .build();
+    }
+
+    // TODO: Fix superCFMD failing on legacy table creation. Seems to be applying composite comparator to partition key
     public static CFMetaData superCFMD(String ksName, String cfName, AbstractType subcc)
     {
         return superCFMD(ksName, cfName, BytesType.instance, subcc);
     }
     public static CFMetaData superCFMD(String ksName, String cfName, AbstractType cc, AbstractType subcc)
     {
+        return superCFMD(ksName, cfName, "cols", cc, subcc);
+    }
+    public static CFMetaData superCFMD(String ksName, String cfName, String ccName, AbstractType cc, AbstractType subcc)
+    {
         CompositeType comp = CompositeType.getInstance(Arrays.asList(new AbstractType<?>[]{cc, subcc}));
 
         return CFMetaData.Builder.createSuper(ksName, cfName, false)
                 .addPartitionKey("key", BytesType.instance)
-                .addClusteringColumn("cols", comp)
+                .addClusteringColumn(ccName, comp)
                 .addRegularColumn(new ColumnIdentifier("val", true), AsciiType.instance)
                 .build();
     }
-    public static CFMetaData indexCFMD(String ksName, String cfName, final Boolean withIdxType) throws ConfigurationException
+    public static CFMetaData indexCFMD(String ksName, String cfName, boolean withIdxType) throws ConfigurationException
     {
-        CFMetaData cfm = CFMetaData.Builder.create(ksName, cfName).addPartitionKey("key",AsciiType.instance).build();
+        CFMetaData cfm = CFMetaData.Builder.create(ksName, cfName)
+                .addPartitionKey("key", AsciiType.instance)
+                .addClusteringColumn("cols", AsciiType.instance)
+                .addRegularColumn("birthdate", LongType.instance)
+                .addRegularColumn("notbirthdate", LongType.instance)
+                .build();
 
         ByteBuffer cName = ByteBufferUtil.bytes("birthdate");
-        IndexType keys = withIdxType ? IndexType.KEYS : null;
-        return cfm.addColumnDefinition(ColumnDefinition.regularDef(cfm, cName, LongType.instance, null)
-                                                       .setIndex(withIdxType ? ByteBufferUtil.bytesToHex(cName) : null, keys, null));
+        String idxName = withIdxType ? ByteBufferUtil.bytesToHex(ByteBufferUtil.bytes(ksName + "_" + cfName + "_" + "birthdate")) : null;
+        IndexType idxType = withIdxType ? IndexType.COMPOSITES : null;
+        cfm.getColumnDefinition(cName).setIndex(idxName, idxType, Collections.EMPTY_MAP);
+
+        return cfm;
     }
     public static CFMetaData compositeIndexCFMD(String ksName, String cfName, final Boolean withIdxType) throws ConfigurationException
     {
@@ -430,12 +471,12 @@ public class SchemaLoader
         ByteBuffer cName = ByteBufferUtil.bytes("col1");
         IndexType idxType = withIdxType ? IndexType.COMPOSITES : null;
         return cfm.addColumnDefinition(ColumnDefinition.regularDef(cfm, cName, UTF8Type.instance, 1)
-                                                       .setIndex(withIdxType ? "col1_idx" : null, idxType, Collections.<String, String>emptyMap()));
+                                                       .setIndex("col1_idx", idxType, Collections.<String, String>emptyMap()));
     }
     
     private static CFMetaData jdbcCFMD(String ksName, String cfName, AbstractType comp)
     {
-        return CFMetaData.Builder.create(ksName, cfName).addPartitionKey("key", comp).addClusteringColumn("name",comp).build();
+        return CFMetaData.Builder.create(ksName, cfName).addPartitionKey("key", comp).addClusteringColumn("name", comp).build();
     }
 
     public static void cleanupAndLeaveDirs()
