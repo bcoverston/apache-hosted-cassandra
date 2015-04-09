@@ -207,4 +207,9 @@ public class RowUpdateBuilder
     {
         return update.metadata().getColumnDefinition(new ColumnIdentifier(name, true));
     }
+
+    public AtomIterator atomIterator()
+    {
+        return update.atomIterator();
+    }
 }

@@ -21,11 +21,14 @@
 package org.apache.cassandra;
 
 import java.nio.ByteBuffer;
+import java.util.SortedSet;
+import java.util.TreeSet;
 
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.DataLimits;
+import org.apache.cassandra.db.filter.NamesPartitionFilter;
 import org.apache.cassandra.db.filter.PartitionFilter;
 import org.apache.cassandra.db.filter.SlicePartitionFilter;
 import org.apache.cassandra.dht.*;
@@ -44,6 +47,7 @@ public class PartitionRangeReadBuilder extends AbstractReadCommandBuilder
     private RangeType rangeType = RangeType.Inclusive;
     private ByteBuffer startKey;
     private ByteBuffer endKey;
+    private SortedSet<Clustering> clusterings;
 
     public PartitionRangeReadBuilder(ColumnFamilyStore cfs)
     {
@@ -53,6 +57,8 @@ public class PartitionRangeReadBuilder extends AbstractReadCommandBuilder
     public PartitionRangeReadBuilder(ColumnFamilyStore cfs, int nowInSeconds)
     {
         super(cfs, nowInSeconds);
+
+        clusterings = new TreeSet<>(cfs.getComparator());
     }
 
     public PartitionRangeReadBuilder setKeyBounds(ByteBuffer start, ByteBuffer end)
@@ -65,6 +71,17 @@ public class PartitionRangeReadBuilder extends AbstractReadCommandBuilder
     public PartitionRangeReadBuilder setRangeType(RangeType type)
     {
         rangeType = type;
+        return this;
+    }
+
+    public PartitionRangeReadBuilder addClustering(Object... objects)
+    {
+        CBuilder builder = CBuilder.create(cfs.getComparator());
+        for (Object j : objects)
+        {
+            builder.add(j);
+        }
+        clusterings.add(builder.build());
         return this;
     }
 
@@ -102,7 +119,9 @@ public class PartitionRangeReadBuilder extends AbstractReadCommandBuilder
                     ? Slices.ALL
                     : Slices.with(cfs.getComparator(), Slice.make(lowerClusteringBound, upperClusteringBound));
 
-            PartitionFilter filter = new SlicePartitionFilter(builder.build(), slices, reversed);
+            PartitionFilter filter = clusterings.isEmpty()
+                    ? new SlicePartitionFilter(builder.build(), slices, reversed)
+                    : new NamesPartitionFilter(builder.build(), clusterings, reversed);
 
             if (startKey == null || endKey == null)
             {
