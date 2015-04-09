@@ -457,7 +457,8 @@ public class SchemaLoader
                 .build();
 
         ByteBuffer cName = ByteBufferUtil.bytes("birthdate");
-        cfm.getColumnDefinition(cName).setIndex(withIdxType ? ByteBufferUtil.bytesToHex(cName) : null, IndexType.COMPOSITES, Collections.EMPTY_MAP);
+        IndexType keys = withIdxType ? IndexType.COMPOSITES : null;
+        cfm.getColumnDefinition(cName).setIndex(withIdxType ? ByteBufferUtil.bytesToHex(cName) : null, keys, Collections.EMPTY_MAP);
 
         return cfm;
     }
