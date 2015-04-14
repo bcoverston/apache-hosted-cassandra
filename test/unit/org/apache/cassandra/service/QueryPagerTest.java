@@ -133,7 +133,7 @@ public class QueryPagerTest
 
         List<ReadPartition> partitionList = new ArrayList<>();
 
-        for (RowIterator rowIterator : once(partitions))
+        for (RowIterator rowIterator : Util.once(partitions))
         {
             ReadPartition partition = ReadPartition.create(rowIterator);
             sb.append(partition);
@@ -146,16 +146,6 @@ public class QueryPagerTest
         assertEquals(sb.toString(), expectedSize, size);
 
         return partitionList;
-    }
-
-    public static <T> Iterable<T> once(final Iterator<T> source) {
-        return new Iterable<T>() {
-            private AtomicBoolean exhausted = new AtomicBoolean();
-            public Iterator<T> iterator() {
-                Preconditions.checkState(!exhausted.getAndSet(true));
-                return source;
-            }
-        };
     }
 
     private static ReadCommand namesQuery(String key, String... names)
@@ -227,7 +217,7 @@ public class QueryPagerTest
         assertEquals(key, string(partition.partitionKey().getKey()));
         assertFalse(partition.isEmpty());
         int i = 0;
-        for (Row row : once(partition.iterator()))
+        for (Row row : Util.once(partition.iterator()))
         {
             ByteBuffer expected = names[i++];
             assertEquals("column " + i + " doesn't match "+string(expected)+" vs "+string(row.clustering().get(0)), expected, row.clustering().get(0));
