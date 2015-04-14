@@ -27,6 +27,9 @@ import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import com.google.common.base.Preconditions;
 
 import org.apache.cassandra.db.ClusteringPrefix;
 
@@ -130,17 +133,32 @@ public class Util
         return StorageService.getPartitioner().getToken(ByteBufferUtil.bytes(key));
     }
 
-    /*
+
     public static Range<RowPosition> range(String left, String right)
     {
-        return new Range<RowPosition>(rp(left), rp(right));
+        return new Range<>(rp(left), rp(right));
     }
 
     public static Range<RowPosition> range(IPartitioner p, String left, String right)
     {
-        return new Range<RowPosition>(rp(left, p), rp(right, p));
+        return new Range<>(rp(left, p), rp(right, p));
     }
 
+    //Test helper to make an iterator iterable once
+    public static <T> Iterable<T> once(final Iterator<T> source)
+    {
+        return new Iterable<T>()
+        {
+            private AtomicBoolean exhausted = new AtomicBoolean();
+            public Iterator<T> iterator()
+            {
+                Preconditions.checkState(!exhausted.getAndSet(true));
+                return source;
+            }
+        };
+    }
+
+    /*
     public static Bounds<RowPosition> bounds(String left, String right)
     {
         return new Bounds<RowPosition>(rp(left), rp(right));
